@@ -11,7 +11,6 @@ from pathlib import Path
 
 import requests
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
-from urllib.parse import urlparse, parse_qs
 
 class _RingHandler(logging.Handler):
     def __init__(self, maxlen=500):
@@ -149,9 +148,16 @@ def save_state(state):
     _atomic_write(STATE_FILE, json.dumps(state, indent=2))
 
 def db_connect():
-    conn = sqlite3.connect(WHISPARR_DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    for attempt in range(5):
+        try:
+            conn = sqlite3.connect(WHISPARR_DB, timeout=10)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except sqlite3.OperationalError:
+            if attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
 
 def get_all_studios():
     conn = db_connect()
@@ -530,45 +536,31 @@ def _cleanup_downloads_dir():
             except Exception as e:
                 log.warning('cleanup: failed to remove %s: %s', d.name, e)
 
-PREFERRED_TUBE_SITES = ('tnaflix.com', 'porntrex.com')
-TUBE_DOMAINS = {
-    'tnaflix.com', 'porntrex.com', 'analvids.com', 'xvideos.com',
-    'xhamster.com', 'pornhub.com', 'youporn.com', 'redtube.com',
-    'porndoe.com', 'eporner.com', 'tubegalore.com', 'drtuber.com',
-    'txxx.com', 'hclips.com', 'anysex.com', 'beeg.com',
+_TUBE_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-GB,en;q=0.9',
 }
 
 def search_tube(code):
-    """DDG HTML search for code; return candidate URLs from known tube sites only."""
+    """Search tnaflix for code; return video page URLs that contain the code."""
+    urls = []
+    # tnaflix
     try:
-        r = requests.get('https://html.duckduckgo.com/html/',
-                         params={'q': code},
-                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
+        r = requests.get('https://www.tnaflix.com/search.php',
+                         params={'what': code},
+                         headers={**_TUBE_HEADERS, 'Referer': 'https://www.tnaflix.com/'},
                          timeout=10)
-        raw = re.findall(
-            r'href=["\']([^"\']+)["\'][^>]*class="result__a"|class="result__a"[^>]*href=["\']([^"\']+)["\']',
-            r.text)
-        urls = []
-        for a, b in raw:
-            href = a or b
-            if href.startswith('//'):
-                href = 'https:' + href
-            parsed = urlparse(href)
-            if 'duckduckgo' in parsed.netloc:
-                qs = parse_qs(parsed.query)
-                if 'uddg' in qs:
-                    href = qs['uddg'][0]
-                else:
-                    continue
-            if not href.startswith('http'):
-                continue
-            if not any(d in href for d in TUBE_DOMAINS):
-                continue
-            urls.append(href)
-        urls.sort(key=lambda u: not any(s in u for s in PREFERRED_TUBE_SITES))
-        return urls[:5]
-    except Exception:
-        return []
+        raw = re.findall(r'href="(https://www\.tnaflix\.com/[^"]+/video\d+[^"]*)"', r.text)
+        seen = set()
+        for u in raw:
+            u = u.split('"')[0]
+            if u not in seen and code.upper() in u.upper():
+                seen.add(u)
+                urls.append(u)
+    except Exception as e:
+        log.debug('search_tube tnaflix error: %s', e)
+    return urls[:5]
 
 def _ytdlp_worker(code, urls, dl_dir):
     """Try each URL with yt-dlp; download >=480p to dl_dir. Runs in background thread."""
