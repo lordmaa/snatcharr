@@ -446,6 +446,73 @@ def whisparr_movie_id_for_code(code):
     except Exception:
         return None
 
+def whisparr_has_file(movie_id):
+    """Return True if Whisparr already has a file for this movie."""
+    try:
+        conn = db_connect()
+        row = conn.execute('SELECT MovieFileId FROM Movies WHERE Id = ?', (movie_id,)).fetchone()
+        conn.close()
+        return bool(row and row['MovieFileId'])
+    except Exception:
+        return False
+
+def whisparr_code_has_file(code):
+    """Return True if any Whisparr movie with this code already has a file."""
+    try:
+        conn = db_connect()
+        row = conn.execute('''
+            SELECT m.MovieFileId FROM Movies m
+            JOIN MovieMetadata mm ON m.MovieMetadataId = mm.Id
+            WHERE mm.Code = ? AND m.MovieFileId != 0
+            LIMIT 1
+        ''', (code,)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+def get_sabnzbd_downloads_dir():
+    """Return SABnzbd's completed downloads directory path."""
+    try:
+        r = requests.get(f'{SABNZBD_URL}/api', params={
+            'mode': 'get_config', 'section': 'misc', 'apikey': SABNZBD_KEY, 'output': 'json',
+        }, timeout=10)
+        return r.json().get('config', {}).get('misc', {}).get('complete_dir', '')
+    except Exception:
+        return ''
+
+def _cleanup_downloads_dir():
+    """Delete download folders that are empty or belong to already-imported movies."""
+    dl_dir = get_sabnzbd_downloads_dir()
+    if not dl_dir:
+        return
+    root = Path(dl_dir)
+    if not root.exists():
+        return
+    import shutil
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        # Strip trailing .N duplicate suffix to get the base code
+        code = re.sub(r'\.\d+$', '', d.name).upper()
+        if not CODE_RE.match(code):
+            continue
+        # Empty folder — delete it
+        if not any(d.rglob('*')):
+            try:
+                d.rmdir()
+                log.info('cleanup: removed empty dir %s', d.name)
+            except Exception:
+                pass
+            continue
+        # Movie already imported in Whisparr — dupe download, delete it
+        if whisparr_code_has_file(code):
+            try:
+                shutil.rmtree(d)
+                log.info('cleanup: removed dupe download %s (already imported)', d.name)
+            except Exception as e:
+                log.warning('cleanup: failed to remove %s: %s', d.name, e)
+
 def get_sabnzbd_queue():
     try:
         r = requests.get(f'{SABNZBD_URL}/api', params={
@@ -466,6 +533,18 @@ def find_video_file(storage):
     return str(videos[0]) if videos else None
 
 def whisparr_manual_import(file_path, movie_id):
+    # Guard: if Whisparr already has a file for this movie, skip import and clean up
+    if whisparr_has_file(movie_id):
+        log.info('import skipped for movie %s — already has file; cleaning up %s', movie_id, file_path)
+        src_dir = Path(file_path).parent
+        try:
+            import shutil
+            shutil.rmtree(src_dir)
+            log.info('cleaned up dupe source dir %s', src_dir)
+        except Exception as e:
+            log.warning('cleanup of dupe %s failed: %s', src_dir, e)
+        return True
+
     folder = str(Path(file_path).parent)
     item   = None
     try:
@@ -910,8 +989,10 @@ def _run_auto_snatch_inner():
     log.info('auto-snatch run complete')
 
 def _auto_import_loop():
+    _cleanup_tick = 0
     while True:
         time.sleep(60)
+        _cleanup_tick += 1
         try:
             state     = load_state()
             sab_done  = get_sabnzbd_completed()
@@ -948,6 +1029,18 @@ def _auto_import_loop():
                 code = name.strip()
                 if code in imported_set:
                     continue
+                # If already imported in Whisparr, delete the orphaned download
+                if whisparr_code_has_file(code):
+                    src_dir = Path(storage) if Path(storage).is_dir() else Path(storage).parent
+                    try:
+                        import shutil
+                        shutil.rmtree(src_dir)
+                        log.info('rescue: deleted dupe download %s (already in Whisparr)', code)
+                    except Exception as e:
+                        log.warning('rescue: cleanup of dupe %s failed: %s', src_dir, e)
+                    state['imported'].append(code)
+                    changed = True
+                    continue
                 movie = whisparr_movie_id_for_code(code)
                 if not movie:
                     continue
@@ -965,6 +1058,11 @@ def _auto_import_loop():
 
             if changed:
                 save_state(state)
+
+            # Every 30 minutes: sweep downloads dir for dupes and empty folders
+            if _cleanup_tick % 30 == 0:
+                _cleanup_downloads_dir()
+
         except Exception:
             log.exception('auto-import loop error')
 
