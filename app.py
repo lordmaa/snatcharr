@@ -42,6 +42,7 @@ _DEFAULTS = {
     'snatch_interval_h':  1,
     'retry_not_found_d':  7,
 }
+BUILD_SHA   = os.environ.get('BUILD_SHA', 'dev')
 WHISPARR_DB = os.environ.get('WHISPARR_DB', '/portainer/files/appdata/config/whisparrv3/whisparr3.db')
 _DATA_DIR   = Path(os.environ.get('SNATCHARR_DATA', str(Path(__file__).parent)))
 STATE_FILE  = _DATA_DIR / 'state.json'
@@ -699,6 +700,7 @@ def settings():
         _reload_config(cfg)
         return jsonify({'ok': True})
     return render_template('settings.html',
+        build_sha=BUILD_SHA,
         whisparr_url=cfg.get('whisparr_url', WHISPARR_URL),
         whisparr_key=cfg.get('whisparr_key', WHISPARR_KEY),
         prowlarr_url=cfg.get('prowlarr_url', PROWLARR_URL),

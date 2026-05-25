@@ -133,6 +133,14 @@
   </section>
 
   <button class="btn btn-primary" style="align-self:flex-start;" onclick="save()">Save Settings</button>
+
+  <div style="display:flex;align-items:center;gap:1rem;padding-top:0.5rem;border-top:1px solid var(--border);">
+    <span style="font-size:0.75rem;color:var(--text-muted);font-family:monospace;">
+      Build: <span style="color:var(--text);">{{ build_sha[:7] if build_sha != 'dev' else 'dev' }}</span>
+    </span>
+    <span class="test-result" id="update_result"></span>
+    <button class="btn btn-secondary" style="padding:0.3rem 0.7rem;font-size:0.8rem;" onclick="checkUpdate()">Check for update</button>
+  </div>
 </div>
 {% endblock %}
 
@@ -182,6 +190,24 @@ function testConn(service) {
     result.className = 'test-result test-err';
     result.textContent = '✗ Request failed';
   });
+}
+
+function checkUpdate() {
+  var res = document.getElementById('update_result');
+  res.className = 'test-result'; res.textContent = 'Checking…';
+  fetch('https://api.github.com/repos/lordmaa/snatcharr/commits/main')
+    .then(r => r.json())
+    .then(d => {
+      var latest = d.sha ? d.sha.slice(0, 7) : '?';
+      var current = '{{ build_sha[:7] if build_sha != "dev" else "dev" }}';
+      if (current === 'dev') {
+        res.className = 'test-result'; res.textContent = 'Latest: ' + latest;
+      } else if (d.sha && d.sha.startsWith(current)) {
+        res.className = 'test-result test-ok'; res.textContent = '✓ Up to date (' + latest + ')';
+      } else {
+        res.className = 'test-result test-err'; res.textContent = '↑ Update available → ' + latest;
+      }
+    }).catch(() => { res.className = 'test-result test-err'; res.textContent = '✗ Check failed'; });
 }
 
 function snatchNow() {
