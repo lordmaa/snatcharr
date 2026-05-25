@@ -11,6 +11,7 @@ from pathlib import Path
 
 import requests
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from urllib.parse import urlparse, parse_qs
 
 class _RingHandler(logging.Handler):
     def __init__(self, maxlen=500):
@@ -519,6 +520,65 @@ def _cleanup_downloads_dir():
             except Exception as e:
                 log.warning('cleanup: failed to remove %s: %s', d.name, e)
 
+PREFERRED_TUBE_SITES = ('tnaflix.com', 'porntrex.com')
+
+def search_tube(code):
+    """DDG HTML search for code; return candidate URLs, preferred sites first."""
+    try:
+        r = requests.get('https://html.duckduckgo.com/html/',
+                         params={'q': code},
+                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
+                         timeout=10)
+        # Match result__a hrefs regardless of attribute order
+        raw = re.findall(
+            r'href=["\']([^"\']+)["\'][^>]*class="result__a"|class="result__a"[^>]*href=["\']([^"\']+)["\']',
+            r.text)
+        urls = []
+        for a, b in raw:
+            href = a or b
+            if href.startswith('//'):
+                href = 'https:' + href
+            parsed = urlparse(href)
+            if 'duckduckgo' in parsed.netloc:
+                qs = parse_qs(parsed.query)
+                if 'uddg' in qs:
+                    href = qs['uddg'][0]
+                else:
+                    continue
+            if href.startswith('http'):
+                urls.append(href)
+        urls.sort(key=lambda u: not any(s in u for s in PREFERRED_TUBE_SITES))
+        return urls[:5]
+    except Exception:
+        return []
+
+def _ytdlp_worker(code, urls, dl_dir):
+    """Try each URL with yt-dlp; download >=480p to dl_dir. Runs in background thread."""
+    import yt_dlp
+    dl_dir = Path(dl_dir)
+    try:
+        dl_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log.warning('ytdlp %s: cannot create %s: %s', code, dl_dir, e)
+        return False
+    ydl_opts = {
+        'format': 'bestvideo[height>=720]+bestaudio/best[height>=720]/best',
+        'outtmpl': str(dl_dir / '%(title)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+    }
+    for url in urls:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            if find_video_file(str(dl_dir)):
+                log.info('ytdlp %s: downloaded from %s', code, url)
+                return True
+        except Exception as e:
+            log.warning('ytdlp %s: failed %s — %s', code, url, e)
+    log.warning('ytdlp %s: all URLs failed', code)
+    return False
+
 def get_sabnzbd_queue():
     try:
         r = requests.get(f'{SABNZBD_URL}/api', params={
@@ -956,12 +1016,31 @@ def _run_auto_snatch_inner():
             log.info('auto-snatch: searching %s (%s)', code, p['Name'])
             nzb_results, torrent_results = search_prowlarr(code)
             if not nzb_results and not torrent_results:
-                if code not in state['not_found']:
-                    state['not_found'].append(code)
-                state['not_found_at'][code] = time.strftime('%Y-%m-%dT%H:%M:%S')
-                nf_codes.add(code)
-                changed = True
-                log.info('auto-snatch: %s not found', code)
+                urls = search_tube(code)
+                if urls:
+                    dl_base = get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
+                    dl_dir  = Path(dl_base) / code
+                    state['queued'][code] = {
+                        'nzo_id':     f'ytdlp_{code}',
+                        'wid':        r['wid'],
+                        'title':      r['Title'] or code,
+                        'release':    urls[0][:80],
+                        'client':     'ytdlp',
+                        'dl_path':    str(dl_dir),
+                        'started_at': time.time(),
+                    }
+                    queued.add(code)
+                    changed = True
+                    threading.Thread(target=_ytdlp_worker, args=(code, urls, dl_dir),
+                                     daemon=True, name=f'ytdlp-{code}').start()
+                    log.info('auto-snatch: %s → ytdlp (%d tube URLs)', code, len(urls))
+                else:
+                    if code not in state['not_found']:
+                        state['not_found'].append(code)
+                    state['not_found_at'][code] = time.strftime('%Y-%m-%dT%H:%M:%S')
+                    nf_codes.add(code)
+                    changed = True
+                    log.info('auto-snatch: %s not found anywhere', code)
                 continue
 
             nzo_id = dl_client = result = None
@@ -986,7 +1065,26 @@ def _run_auto_snatch_inner():
                 changed = True
                 log.info('auto-snatch: queued %s via %s — %s', code, dl_client, result['title'][:60])
             else:
-                log.warning('auto-snatch: all clients rejected %s', code)
+                urls = search_tube(code)
+                if urls:
+                    dl_base = get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
+                    dl_dir  = Path(dl_base) / code
+                    state['queued'][code] = {
+                        'nzo_id':     f'ytdlp_{code}',
+                        'wid':        r['wid'],
+                        'title':      r['Title'] or code,
+                        'release':    urls[0][:80],
+                        'client':     'ytdlp',
+                        'dl_path':    str(dl_dir),
+                        'started_at': time.time(),
+                    }
+                    queued.add(code)
+                    changed = True
+                    threading.Thread(target=_ytdlp_worker, args=(code, urls, dl_dir),
+                                     daemon=True, name=f'ytdlp-{code}').start()
+                    log.info('auto-snatch: %s → ytdlp fallback (%d tube URLs)', code, len(urls))
+                else:
+                    log.warning('auto-snatch: all clients rejected %s, no tube results', code)
             time.sleep(2)
 
     conn.close()
@@ -1009,6 +1107,29 @@ def _auto_import_loop():
             for code, info in list(state['queued'].items()):
                 nzo_id = info['nzo_id']
                 client = info.get('client', 'sabnzbd')
+
+                if client == 'ytdlp':
+                    dl_path    = info.get('dl_path', '')
+                    started_at = info.get('started_at', 0)
+                    video      = find_video_file(dl_path) if dl_path else None
+                    if video:
+                        ok = whisparr_manual_import(video, info['wid'])
+                        if ok:
+                            log.info('auto-import %s: imported via ytdlp — %s', code, Path(video).name)
+                            state['imported'].append(code)
+                            del state['queued'][code]
+                            changed = True
+                        else:
+                            log.warning('auto-import %s: ytdlp Whisparr import failed', code)
+                    elif time.time() - started_at > 7200:
+                        log.warning('auto-import %s: ytdlp timed out after 2h', code)
+                        state.setdefault('failed', [])
+                        if code not in state['failed']:
+                            state['failed'].append(code)
+                        del state['queued'][code]
+                        changed = True
+                    continue
+
                 completed = sab_done if client == 'sabnzbd' else qbit_done
                 if nzo_id not in completed:
                     continue
