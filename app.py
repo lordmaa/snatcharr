@@ -281,8 +281,15 @@ def search_prowlarr(code):
                     nzbs.append(result)
         except Exception:
             pass
-    nzbs.sort(key=lambda x: x['size'], reverse=True)
-    torrents.sort(key=lambda x: x['size'], reverse=True)
+    def _res_rank(title):
+        t = title.lower()
+        if '1080' in t: return 0
+        if '2160' in t or '4k' in t: return 1
+        if '720' in t: return 2
+        return 3
+
+    nzbs.sort(key=lambda x: (_res_rank(x['title']), -x['size']))
+    torrents.sort(key=lambda x: (_res_rank(x['title']), -x['size']))
     return nzbs, torrents
 
 def add_to_sabnzbd(nzb_url, nzb_name):
