@@ -11,6 +11,7 @@
     <a href="/studios" class="btn btn-secondary">⚙ Studios</a>
     {% if performers %}
     <button class="btn btn-primary" id="snatchAllBtn" onclick="snatchAll()">Snatch All</button>
+    <button class="btn btn-secondary" id="wipeQueueBtn" onclick="wipeQueue()" style="color:var(--danger,#e05);">Wipe Queue</button>
     {% endif %}
   </div>
 </div>
@@ -79,6 +80,19 @@ function snatchAll() {
       setTimeout(() => { btn.textContent = 'Snatch All'; btn.disabled = false; }, 3000);
     })
     .catch(() => { btn.textContent = 'Snatch All'; btn.disabled = false; });
+}
+function wipeQueue() {
+  if (!confirm('Wipe all queued items so they can be re-snatched?')) return;
+  var btn = document.getElementById('wipeQueueBtn');
+  btn.disabled = true;
+  btn.textContent = 'Wiping…';
+  fetch('/api/wipe-queue', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = '✓ Wiped ' + d.wiped;
+      setTimeout(() => { btn.textContent = 'Wipe Queue'; btn.disabled = false; }, 3000);
+    })
+    .catch(() => { btn.textContent = 'Wipe Queue'; btn.disabled = false; });
 }
 </script>
 {% endblock %}

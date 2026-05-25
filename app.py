@@ -742,6 +742,14 @@ def api_snatch_now():
     threading.Thread(target=_run_auto_snatch, daemon=True, name='snatch-now').start()
     return jsonify({'ok': True, 'msg': 'Snatch run started in background'})
 
+@app.route('/api/wipe-queue', methods=['POST'])
+def api_wipe_queue():
+    state = load_state()
+    wiped = len(state.get('queued', {}))
+    state['queued'] = {}
+    save_state(state)
+    return jsonify({'ok': True, 'wiped': wiped})
+
 def _auto_snatch_loop():
     try:
         _run_auto_snatch()
