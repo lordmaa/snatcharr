@@ -148,9 +148,11 @@ def save_state(state):
     _atomic_write(STATE_FILE, json.dumps(state, indent=2))
 
 def db_connect():
+    # Open read-only via URI so SQLite never tries to write-lock the WAL/SHM files
+    uri = f'file:{WHISPARR_DB}?mode=ro'
     for attempt in range(5):
         try:
-            conn = sqlite3.connect(WHISPARR_DB, timeout=10)
+            conn = sqlite3.connect(uri, uri=True, timeout=10)
             conn.row_factory = sqlite3.Row
             return conn
         except sqlite3.OperationalError:
