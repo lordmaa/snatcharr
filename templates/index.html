@@ -9,6 +9,9 @@
     <span style="font-size:0.8rem;color:var(--text-muted);">{{ active_studios|length }} studio{{ 's' if active_studios|length != 1 }} active</span>
     {% endif %}
     <a href="/studios" class="btn btn-secondary">⚙ Studios</a>
+    {% if performers %}
+    <button class="btn btn-primary" id="snatchAllBtn" onclick="snatchAll()">Snatch All</button>
+    {% endif %}
   </div>
 </div>
 
@@ -61,4 +64,21 @@
   {% endfor %}
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function snatchAll() {
+  var btn = document.getElementById('snatchAllBtn');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  fetch('/api/snatch-now', {method: 'POST'})
+    .then(r => r.json())
+    .then(() => {
+      btn.textContent = '✓ Started';
+      setTimeout(() => { btn.textContent = 'Snatch All'; btn.disabled = false; }, 3000);
+    })
+    .catch(() => { btn.textContent = 'Snatch All'; btn.disabled = false; });
+}
+</script>
 {% endblock %}
