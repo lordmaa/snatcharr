@@ -1083,4 +1083,5 @@ def _ensure_auto_import():
 
 if __name__ == '__main__':
     _start_auto_import()
-    app.run(host='0.0.0.0', port=6060, debug=False)
+    port = int(os.environ.get('SNATCHARR_PORT', 6060))
+    app.run(host='0.0.0.0', port=port, debug=False)
