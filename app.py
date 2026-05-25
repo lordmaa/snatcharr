@@ -419,6 +419,33 @@ def get_sabnzbd_completed():
     except Exception:
         return {}
 
+def get_sabnzbd_history():
+    """Return list of (nzo_id, name, storage) for all completed SABnzbd items."""
+    try:
+        r = requests.get(f'{SABNZBD_URL}/api', params={
+            'mode': 'history', 'apikey': SABNZBD_KEY, 'output': 'json', 'limit': 500,
+        }, timeout=15)
+        return [(s['nzo_id'], s.get('name', ''), s.get('storage', ''))
+                for s in r.json().get('history', {}).get('slots', [])
+                if s.get('status') == 'Completed']
+    except Exception:
+        return []
+
+def whisparr_movie_id_for_code(code):
+    """Return (movie_id, path) for an unimported Whisparr movie matching code, or None."""
+    try:
+        conn = db_connect()
+        row = conn.execute('''
+            SELECT m.Id, m.Path FROM Movies m
+            JOIN MovieMetadata mm ON m.MovieMetadataId = mm.Id
+            WHERE mm.Code = ? AND m.MovieFileId = 0
+            LIMIT 1
+        ''', (code,)).fetchone()
+        conn.close()
+        return (row['Id'], row['Path']) if row else None
+    except Exception:
+        return None
+
 def get_sabnzbd_queue():
     try:
         r = requests.get(f'{SABNZBD_URL}/api', params={
@@ -877,12 +904,12 @@ def _auto_import_loop():
     while True:
         time.sleep(60)
         try:
-            state = load_state()
-            if not state['queued']:
-                continue
+            state     = load_state()
             sab_done  = get_sabnzbd_completed()
             qbit_done = get_qbittorrent_completed()
-            changed = False
+            changed   = False
+
+            # Normal: import tracked queued items
             for code, info in list(state['queued'].items()):
                 nzo_id = info['nzo_id']
                 client = info.get('client', 'sabnzbd')
@@ -902,6 +929,31 @@ def _auto_import_loop():
                     changed = True
                 else:
                     log.warning('auto-import %s: Whisparr import failed', code)
+
+            # Rescue: catch completed SABnzbd downloads that lost their state entry
+            tracked_nzo_ids = {info['nzo_id'] for info in state['queued'].values()}
+            imported_set    = set(state.get('imported', []))
+            for nzo_id, name, storage in get_sabnzbd_history():
+                if nzo_id in tracked_nzo_ids or not name or not storage:
+                    continue
+                code = name.strip()
+                if code in imported_set:
+                    continue
+                movie = whisparr_movie_id_for_code(code)
+                if not movie:
+                    continue
+                wid, _ = movie
+                video = find_video_file(storage)
+                if not video:
+                    continue
+                ok = whisparr_manual_import(video, wid)
+                if ok:
+                    log.info('auto-import rescue %s: imported — %s', code, Path(video).name)
+                    state['imported'].append(code)
+                    changed = True
+                else:
+                    log.warning('auto-import rescue %s: Whisparr import failed', code)
+
             if changed:
                 save_state(state)
         except Exception:
