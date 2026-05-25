@@ -87,6 +87,10 @@ RETRY_NOT_FOUND_D = 7
 
 NEWZNAB_CATS = '6000,6010,6020,6030,6040,6050'
 
+_nzb_lock = threading.Lock()
+_nzb_last = 0.0
+_NZB_INTERVAL = 5  # minimum seconds between NZB download attempts globally
+
 def get_prowlarr_indexers():
     try:
         r = requests.get(f'{PROWLARR_URL}/api/v1/indexer',
@@ -305,6 +309,12 @@ def search_prowlarr(code):
     return nzbs, torrents
 
 def add_to_sabnzbd(nzb_url, nzb_name):
+    global _nzb_last
+    with _nzb_lock:
+        wait = _NZB_INTERVAL - (time.time() - _nzb_last)
+        if wait > 0:
+            time.sleep(wait)
+        _nzb_last = time.time()
     try:
         nzb_resp = requests.get(nzb_url, timeout=30)
         if nzb_resp.status_code == 429:
