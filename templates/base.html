@@ -102,6 +102,7 @@ nav {
     <a href="/studios" {% if request.endpoint == 'studios' %}class="active"{% endif %}>Studios</a>
     <a href="/queue" {% if request.endpoint == 'queue_page' %}class="active"{% endif %}>Queue</a>
     <a href="/settings" {% if request.endpoint == 'settings' %}class="active"{% endif %}>Settings</a>
+    <a href="/logs" {% if request.endpoint == 'logs_page' %}class="active"{% endif %}>Logs</a>
   </div>
   <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem;">
     <button class="blur-toggle" id="syncBtn" onclick="syncLibrary()" title="Sync with Whisparr inventory">

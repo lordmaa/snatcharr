@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block title %} — Logs{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Logs</h1>
+  <div style="display:flex;gap:0.75rem;align-items:center;">
+    <span style="font-size:0.8rem;color:var(--text-muted);">{{ lines|length }} entries</span>
+    <button class="btn btn-secondary" onclick="copyLogs()">Copy</button>
+    <button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+  </div>
+</div>
+
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+            padding:1rem;font-family:monospace;font-size:0.78rem;line-height:1.6;
+            overflow-x:auto;max-height:80vh;overflow-y:auto;" id="logbox">
+  {% for line in lines %}
+  <div style="color:{% if 'WARNING' in line %}var(--amber){% elif 'ERROR' in line or 'CRITICAL' in line %}var(--red){% else %}var(--text-muted){% endif %};
+              white-space:pre-wrap;word-break:break-all;padding:0.1rem 0;">{{ line }}</div>
+  {% else %}
+  <div style="color:var(--text-muted);">No log entries yet.</div>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyLogs() {
+  var lines = [...document.querySelectorAll('#logbox div')].map(d => d.textContent).join('\n');
+  navigator.clipboard.writeText(lines).then(() => {
+    var btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+</script>
+{% endblock %}

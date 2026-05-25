@@ -1,3 +1,4 @@
+import collections
 import json
 import logging
 import os
@@ -11,8 +12,18 @@ from pathlib import Path
 import requests
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
-log = logging.getLogger(__name__)
+class _RingHandler(logging.Handler):
+    def __init__(self, maxlen=500):
+        super().__init__()
+        self.records = collections.deque(maxlen=maxlen)
+    def emit(self, record):
+        self.records.appendleft(self.format(record))
+
+_ring = _RingHandler()
+_ring.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.getLogger().addHandler(_ring)
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -702,6 +713,10 @@ def settings():
         snatch_interval_h=cfg.get('snatch_interval_h', _DEFAULTS['snatch_interval_h']),
         retry_not_found_d=cfg.get('retry_not_found_d', _DEFAULTS['retry_not_found_d']),
     )
+
+@app.route('/logs')
+def logs_page():
+    return render_template('logs.html', lines=list(_ring.records))
 
 @app.route('/api/snatch-now', methods=['POST'])
 def api_snatch_now():
