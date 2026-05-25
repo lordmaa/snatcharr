@@ -24,7 +24,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:0.5rem;">
         <span style="font-size:0.65rem;color:var(--text-muted);font-family:monospace;">
-          {% if r.client == 'qbittorrent' %}⬇ torrent{% else %}⬇ usenet{% endif %}
+          {% if r.client == 'qbittorrent' %}⬇ torrent{% elif r.client == 'ytdlp' %}⬇ yt-dlp{% else %}⬇ usenet{% endif %}
         </span>
         <span class="badge {% if r.done %}badge-have{% else %}badge-queued{% endif %}">
           {% if r.done %}Ready{% else %}Downloading{% endif %}
