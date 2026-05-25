@@ -102,13 +102,22 @@ def get_prowlarr_indexers():
 CODE_RE           = re.compile(r'^(?:[A-Za-z]{1,4}\d{2,6}|\d{4,7})$')
 VIDEO_EXTS        = {'.mkv', '.mp4', '.avi', '.m4v', '.mov'}
 
+def _atomic_write(path: Path, data: str):
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(data)
+    tmp.replace(path)
+
+def _safe_json_load(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
 def load_config():
-    if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text())
-    return {'active_studios': []}
+    return _safe_json_load(CONFIG_FILE, {'active_studios': []})
 
 def save_config(cfg):
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    _atomic_write(CONFIG_FILE, json.dumps(cfg, indent=2))
 
 # Apply saved config on startup
 _reload_config()
@@ -117,19 +126,16 @@ def get_active_studios():
     return set(load_config().get('active_studios', []))
 
 def load_state():
-    if STATE_FILE.exists():
-        s = json.loads(STATE_FILE.read_text())
-    else:
-        s = {}
+    s = _safe_json_load(STATE_FILE, {})
     s.setdefault('queued', {})
     s.setdefault('imported', [])
     s.setdefault('not_found', [])
-    s.setdefault('not_found_at', {})   # code -> ISO timestamp of last search
+    s.setdefault('not_found_at', {})
     s.setdefault('failed', [])
     return s
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    _atomic_write(STATE_FILE, json.dumps(state, indent=2))
 
 def db_connect():
     conn = sqlite3.connect(WHISPARR_DB)
