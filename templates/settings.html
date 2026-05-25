@@ -132,6 +132,35 @@
     </div>
   </section>
 
+  <section style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;">
+    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-muted);font-weight:600;margin-bottom:1rem;">
+      yt-dlp <span style="font-size:0.65rem;text-transform:none;letter-spacing:0;">(tube site fallback)</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:0.75rem;">
+      <div style="display:flex;align-items:center;gap:0.75rem;">
+        <input type="checkbox" id="ytdlp_enabled" style="accent-color:var(--accent);width:15px;height:15px;" {% if ytdlp_enabled %}checked{% endif %}>
+        <label for="ytdlp_enabled" style="font-size:0.875rem;color:var(--text-muted);cursor:pointer;">Enable — try tube sites when Prowlarr finds nothing</label>
+      </div>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+        <div style="flex:1;min-width:160px;">
+          <label style="display:block;font-size:0.8rem;color:var(--text-muted);margin-bottom:0.3rem;">Minimum resolution (p)</label>
+          <select id="ytdlp_min_res" class="settings-input" style="font-family:inherit;">
+            {% for res in [480, 720, 1080] %}
+            <option value="{{ res }}" {% if ytdlp_min_res == res %}selected{% endif %}>{{ res }}p</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div style="flex:2;min-width:200px;">
+          <label style="display:block;font-size:0.8rem;color:var(--text-muted);margin-bottom:0.3rem;">
+            Download directory <span style="font-size:0.75rem;">(must be accessible to Whisparr; leave blank to use SABnzbd's dir)</span>
+          </label>
+          <input id="ytdlp_dl_dir" class="settings-input" placeholder="/mnt/nas/downloads" value="{{ ytdlp_dl_dir }}">
+        </div>
+      </div>
+    </div>
+  </section>
+
   <button class="btn btn-primary" style="align-self:flex-start;" onclick="save()">Save Settings</button>
 
   <div style="display:flex;align-items:center;gap:1rem;padding-top:0.5rem;border-top:1px solid var(--border);">
@@ -236,6 +265,9 @@ function save() {
     auto_snatch:       document.getElementById('auto_snatch').checked,
     snatch_interval_h: parseInt(document.getElementById('snatch_interval_h').value),
     retry_not_found_d: parseInt(document.getElementById('retry_not_found_d').value),
+    ytdlp_enabled:     document.getElementById('ytdlp_enabled').checked,
+    ytdlp_min_res:     parseInt(document.getElementById('ytdlp_min_res').value),
+    ytdlp_dl_dir:      document.getElementById('ytdlp_dl_dir').value.trim(),
   };
   fetch('/settings', {
     method: 'POST',

@@ -42,6 +42,9 @@ _DEFAULTS = {
     'auto_snatch':        True,
     'snatch_interval_h':  1,
     'retry_not_found_d':  7,
+    'ytdlp_enabled':      True,
+    'ytdlp_min_res':      720,
+    'ytdlp_dl_dir':       '',
 }
 BUILD_SHA   = os.environ.get('BUILD_SHA', 'dev')
 WHISPARR_DB = os.environ.get('WHISPARR_DB', '/portainer/files/appdata/config/whisparrv3/whisparr3.db')
@@ -66,6 +69,7 @@ def _reload_config(cfg=None):
     global SABNZBD_URL, SABNZBD_KEY, PERFORMER_TAG
     global QBITTORRENT_URL, QBITTORRENT_USER, QBITTORRENT_PASS
     global AUTO_SNATCH, SNATCH_INTERVAL_H, RETRY_NOT_FOUND_D
+    global YTDLP_ENABLED, YTDLP_MIN_RES, YTDLP_DL_DIR
     if cfg is None:
         cfg = load_config()
     WHISPARR_URL      = cfg.get('whisparr_url',       _DEFAULTS['whisparr_url'])
@@ -81,10 +85,16 @@ def _reload_config(cfg=None):
     AUTO_SNATCH       = cfg.get('auto_snatch',        _DEFAULTS['auto_snatch'])
     SNATCH_INTERVAL_H = cfg.get('snatch_interval_h',  _DEFAULTS['snatch_interval_h'])
     RETRY_NOT_FOUND_D = cfg.get('retry_not_found_d',  _DEFAULTS['retry_not_found_d'])
+    YTDLP_ENABLED     = cfg.get('ytdlp_enabled',      _DEFAULTS['ytdlp_enabled'])
+    YTDLP_MIN_RES     = int(cfg.get('ytdlp_min_res',  _DEFAULTS['ytdlp_min_res']))
+    YTDLP_DL_DIR      = cfg.get('ytdlp_dl_dir',       _DEFAULTS['ytdlp_dl_dir'])
 
 AUTO_SNATCH = True
 SNATCH_INTERVAL_H = 4
 RETRY_NOT_FOUND_D = 7
+YTDLP_ENABLED = True
+YTDLP_MIN_RES = 720
+YTDLP_DL_DIR  = ''
 
 NEWZNAB_CATS = '6000,6010,6020,6030,6040,6050'
 
@@ -562,7 +572,7 @@ def _ytdlp_worker(code, urls, dl_dir):
         log.warning('ytdlp %s: cannot create %s: %s', code, dl_dir, e)
         return False
     ydl_opts = {
-        'format': 'bestvideo[height>=720]+bestaudio/best[height>=720]/best',
+        'format': f'bestvideo[height>={YTDLP_MIN_RES}]+bestaudio/best[height>={YTDLP_MIN_RES}]/best',
         'outtmpl': str(dl_dir / '%(title)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -891,7 +901,8 @@ def settings():
         for key in ('whisparr_url', 'whisparr_key', 'prowlarr_url', 'prowlarr_key',
                     'sabnzbd_url', 'sabnzbd_key',
                     'qbittorrent_url', 'qbittorrent_user', 'qbittorrent_pass',
-                    'performer_tag', 'auto_snatch', 'snatch_interval_h', 'retry_not_found_d'):
+                    'performer_tag', 'auto_snatch', 'snatch_interval_h', 'retry_not_found_d',
+                    'ytdlp_enabled', 'ytdlp_min_res', 'ytdlp_dl_dir'):
             if key in data:
                 cfg[key] = data[key]
         save_config(cfg)
@@ -912,6 +923,9 @@ def settings():
         auto_snatch=cfg.get('auto_snatch', _DEFAULTS['auto_snatch']),
         snatch_interval_h=cfg.get('snatch_interval_h', _DEFAULTS['snatch_interval_h']),
         retry_not_found_d=cfg.get('retry_not_found_d', _DEFAULTS['retry_not_found_d']),
+        ytdlp_enabled=cfg.get('ytdlp_enabled', _DEFAULTS['ytdlp_enabled']),
+        ytdlp_min_res=cfg.get('ytdlp_min_res', _DEFAULTS['ytdlp_min_res']),
+        ytdlp_dl_dir=cfg.get('ytdlp_dl_dir', _DEFAULTS['ytdlp_dl_dir']),
     )
 
 @app.route('/logs')
@@ -1016,9 +1030,9 @@ def _run_auto_snatch_inner():
             log.info('auto-snatch: searching %s (%s)', code, p['Name'])
             nzb_results, torrent_results = search_prowlarr(code)
             if not nzb_results and not torrent_results:
-                urls = search_tube(code)
+                urls = search_tube(code) if YTDLP_ENABLED else []
                 if urls:
-                    dl_base = get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
+                    dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
                     dl_dir  = Path(dl_base) / code
                     state['queued'][code] = {
                         'nzo_id':     f'ytdlp_{code}',
@@ -1065,9 +1079,9 @@ def _run_auto_snatch_inner():
                 changed = True
                 log.info('auto-snatch: queued %s via %s — %s', code, dl_client, result['title'][:60])
             else:
-                urls = search_tube(code)
+                urls = search_tube(code) if YTDLP_ENABLED else []
                 if urls:
-                    dl_base = get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
+                    dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
                     dl_dir  = Path(dl_base) / code
                     state['queued'][code] = {
                         'nzo_id':     f'ytdlp_{code}',
