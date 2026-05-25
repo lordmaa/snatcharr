@@ -28,7 +28,7 @@ _DEFAULTS = {
     'qbittorrent_pass':   '',
     'performer_tag':      '',
     'auto_snatch':        True,
-    'snatch_interval_h':  4,
+    'snatch_interval_h':  1,
     'retry_not_found_d':  7,
 }
 WHISPARR_DB = os.environ.get('WHISPARR_DB', '/portainer/files/appdata/config/whisparrv3/whisparr3.db')
@@ -709,6 +709,10 @@ def api_snatch_now():
     return jsonify({'ok': True, 'msg': 'Snatch run started in background'})
 
 def _auto_snatch_loop():
+    try:
+        _run_auto_snatch()
+    except Exception:
+        log.exception('auto-snatch startup run error')
     while True:
         time.sleep(SNATCH_INTERVAL_H * 3600)
         if not AUTO_SNATCH:
