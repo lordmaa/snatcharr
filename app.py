@@ -99,7 +99,7 @@ def get_prowlarr_indexers():
         return [i['id'] for i in r.json() if i.get('enable', True)]
     except Exception:
         return []
-CODE_RE           = re.compile(r'^[A-Za-z]{1,4}\d{2,6}$')
+CODE_RE           = re.compile(r'^(?:[A-Za-z]{1,4}\d{2,6}|\d{4,7})$')
 VIDEO_EXTS        = {'.mkv', '.mp4', '.avi', '.m4v', '.mov'}
 
 def load_config():
