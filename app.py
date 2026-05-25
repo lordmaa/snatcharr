@@ -90,6 +90,7 @@ NEWZNAB_CATS = '6000,6010,6020,6030,6040,6050'
 _nzb_lock = threading.Lock()
 _nzb_last = 0.0
 _NZB_INTERVAL = 5  # minimum seconds between NZB download attempts globally
+_snatch_running = threading.Lock()  # prevent concurrent snatch runs
 
 def get_prowlarr_indexers():
     try:
@@ -335,7 +336,7 @@ def add_to_sabnzbd(nzb_url, nzb_name):
             'mode': 'addfile', 'nzbname': nzb_name,
             'cat': 'whisparr', 'apikey': SABNZBD_KEY, 'output': 'json',
         }, files={'nzbfile': (f'{nzb_name}.nzb', content, 'application/x-nzb')},
-        timeout=15)
+        timeout=60)
         data = r.json()
         log.info('sabnzbd addfile response for %s: %s', nzb_name, data)
         if data.get('status'):
@@ -750,6 +751,15 @@ def _auto_snatch_loop():
             log.exception('auto-snatch loop error')
 
 def _run_auto_snatch():
+    if not _snatch_running.acquire(blocking=False):
+        log.info('auto-snatch: already running, skipping')
+        return
+    try:
+        _run_auto_snatch_inner()
+    finally:
+        _snatch_running.release()
+
+def _run_auto_snatch_inner():
     active   = get_active_studios()
     if not active:
         return
