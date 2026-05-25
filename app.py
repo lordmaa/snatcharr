@@ -493,7 +493,7 @@ def whisparr_manual_import(file_path, movie_id):
             json={'name': 'ManualImport', 'files': [item], 'importMode': 'move'},
             timeout=30)
         if r.status_code == 201:
-            # Rescan after a delay so the async file move has time to complete
+            src_dir = Path(file_path).parent
             def _rescan():
                 time.sleep(180)
                 try:
@@ -503,6 +503,15 @@ def whisparr_manual_import(file_path, movie_id):
                     log.info('rescan fired for movie %s', movie_id)
                 except Exception:
                     pass
+                try:
+                    if src_dir.exists() and not any(
+                        f.suffix.lower() in VIDEO_EXTS for f in src_dir.rglob('*') if f.is_file()
+                    ):
+                        import shutil
+                        shutil.rmtree(src_dir)
+                        log.info('cleaned up source dir %s', src_dir)
+                except Exception as e:
+                    log.warning('cleanup of %s failed: %s', src_dir, e)
             threading.Thread(target=_rescan, daemon=True).start()
             return True
         return False
