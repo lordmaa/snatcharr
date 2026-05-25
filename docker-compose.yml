@@ -1,0 +1,19 @@
+services:
+  snatcharr:
+    image: ghcr.io/lordmaa/snatcharr:latest
+    container_name: snatcharr
+    restart: unless-stopped
+    ports:
+      - "6060:6060"
+    environment:
+      - WHISPARR_DB=/whisparr-config/whisparr3.db
+      - SNATCHARR_DATA=/data
+    volumes:
+      - snatcharr-data:/data
+      - /portainer/files/appdata/config/whisparrv3:/whisparr-config:ro
+      # Mount your download paths so snatcharr can find completed files
+      # Match whatever paths SABnzbd and qBittorrent use on the host:
+      - /mnt/nas/downloads:/mnt/nas/downloads
+
+volumes:
+  snatcharr-data:

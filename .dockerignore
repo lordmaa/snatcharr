@@ -1,0 +1,6 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+state.json
+config.json

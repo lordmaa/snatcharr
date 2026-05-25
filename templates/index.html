@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block title %} — Performers{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Performers</h1>
+  <div style="display:flex;gap:0.75rem;align-items:center;">
+    {% if active_studios %}
+    <span style="font-size:0.8rem;color:var(--text-muted);">{{ active_studios|length }} studio{{ 's' if active_studios|length != 1 }} active</span>
+    {% endif %}
+    <a href="/studios" class="btn btn-secondary">⚙ Studios</a>
+  </div>
+</div>
+
+{% if not active_studios %}
+<div style="text-align:center;padding:4rem 1rem;color:var(--text-muted);">
+  <div style="font-size:2rem;margin-bottom:1rem;">🎬</div>
+  <div style="font-size:1.1rem;margin-bottom:0.5rem;color:var(--text);">No studios selected</div>
+  <p style="margin-bottom:1.5rem;">Choose which studios to search before browsing performers.</p>
+  <a href="/studios" class="btn btn-primary">Select Studios</a>
+</div>
+
+{% elif not performers %}
+<div style="text-align:center;padding:4rem 1rem;color:var(--text-muted);">
+  <div style="font-size:2rem;margin-bottom:1rem;">🔍</div>
+  <div style="font-size:1.1rem;color:var(--text);">No performers found for selected studios</div>
+</div>
+
+{% else %}
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem;">
+  {% for p in performers %}
+  <a href="/performer/{{ p.name | urlencode }}" style="text-decoration:none;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+                overflow:hidden;transition:border-color 0.15s,background 0.15s;"
+         onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--surface2)'"
+         onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      {% if p.headshot %}
+      <div style="width:100%;height:220px;overflow:hidden;background:var(--surface2);">
+        <img class="scene-thumb" src="{{ p.headshot }}" alt="{{ p.name }}"
+             style="width:100%;height:100%;object-fit:cover;object-position:center 15%;display:block;transition:filter 0.2s;"
+             onerror="this.parentElement.style.display='none'">
+      </div>
+      {% endif %}
+      <div style="padding:0.9rem 1rem 0.85rem;">
+        <div style="font-size:0.95rem;font-weight:600;color:var(--text);margin-bottom:0.6rem;
+                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</div>
+        <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">
+          {% if p.have %}
+          <span class="badge badge-have">{{ p.have }} have</span>
+          {% endif %}
+          {% if p.missing %}
+          <span class="badge badge-missing">{{ p.missing }} missing</span>
+          {% endif %}
+          {% if p.queued %}
+          <span class="badge badge-queued">{{ p.queued }} queued</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,98 @@
+{% extends 'base.html' %}
+{% block title %} — Queue{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Queue</h1>
+  {% if rows %}
+  <button class="btn btn-primary" onclick="importAll()">Import Completed</button>
+  {% endif %}
+</div>
+
+{% if rows %}
+<div style="margin-bottom:2rem;">
+  <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+              color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">Active Downloads</div>
+  {% for r in rows %}
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+              padding:0.75rem 1rem;margin-bottom:0.5rem;" id="qrow-{{ r.nzo_id }}">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:0.5rem;">
+      <div>
+        <span style="color:var(--accent);font-weight:600;font-size:0.875rem;">{{ r.code }}</span>
+        <span style="color:var(--text-muted);margin:0 0.5rem;">·</span>
+        <span style="font-size:0.875rem;color:var(--text);">{{ r.title }}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:0.5rem;">
+        <span style="font-size:0.65rem;color:var(--text-muted);font-family:monospace;">
+          {% if r.client == 'qbittorrent' %}⬇ torrent{% else %}⬇ usenet{% endif %}
+        </span>
+        <span class="badge {% if r.done %}badge-have{% else %}badge-queued{% endif %}">
+          {% if r.done %}Ready{% else %}Downloading{% endif %}
+        </span>
+      </div>
+    </div>
+    <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.4rem;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+      {{ r.release }}
+    </div>
+    {% if not r.done %}
+    <div style="background:var(--surface2);border-radius:4px;height:4px;overflow:hidden;">
+      <div style="background:var(--accent);height:100%;width:{{ r.percentage }}%;transition:width 1s;"></div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p style="color:var(--text-muted);padding:2rem 0;">Nothing in the download queue.</p>
+{% endif %}
+
+{% if imported %}
+<div>
+  <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+              color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">Imported ({{ imported|length }})</div>
+  <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+    {% for code in imported %}
+    <span class="badge badge-have">{{ code }}</span>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if not_found %}
+<div style="margin-top:1.5rem;">
+  <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+              color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">Not found ({{ not_found|length }})</div>
+  <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+    {% for code in not_found %}
+    <span class="badge badge-not_found">{{ code }}</span>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div id="importLog" style="display:none;margin-top:1.5rem;background:var(--surface);
+     border:1px solid var(--border);border-radius:var(--radius);padding:1rem;
+     font-family:monospace;font-size:0.8rem;"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function importAll() {
+  fetch('/import', {method: 'POST'})
+    .then(r => r.json())
+    .then(results => {
+      var log = document.getElementById('importLog');
+      log.style.display = 'block';
+      log.innerHTML = '';
+      results.forEach(r => {
+        var line = document.createElement('div');
+        line.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+        line.textContent = (r.ok ? '✓ ' : '✗ ') + '[' + r.code + '] ' + r.msg;
+        log.appendChild(line);
+      });
+      if (results.some(r => r.ok)) setTimeout(() => location.reload(), 2000);
+    });
+}
+</script>
+{% endblock %}

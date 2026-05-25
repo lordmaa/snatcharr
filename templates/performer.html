@@ -1,0 +1,225 @@
+{% extends 'base.html' %}
+{% block title %} — {{ name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <a href="/" style="color:var(--text-muted);font-size:0.875rem;">← Performers</a>
+    <h1 class="page-title" style="margin:0;">{{ name }}</h1>
+    <div style="display:flex;gap:0.5rem;">
+      {% if have %}<span class="badge badge-have">{{ have }} have</span>{% endif %}
+      {% if missing %}<span class="badge badge-missing">{{ missing }} missing</span>{% endif %}
+      {% if queued %}<span class="badge badge-queued">{{ queued }} queued</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- Filter tabs -->
+<div style="display:flex;gap:0.5rem;margin-bottom:1rem;" id="filterTabs">
+  <button class="btn btn-primary" data-filter="all" onclick="setFilter('all',this)">All ({{ scenes|length }})</button>
+  <button class="btn btn-secondary" data-filter="missing" onclick="setFilter('missing',this)">Missing ({{ missing }})</button>
+  <button class="btn btn-secondary" data-filter="have" onclick="setFilter('have',this)">Have ({{ have }})</button>
+  {% if queued %}<button class="btn btn-secondary" data-filter="queued" onclick="setFilter('queued',this)">Queued ({{ queued }})</button>{% endif %}
+</div>
+
+<!-- Select bar -->
+<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;flex-wrap:wrap;">
+  <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.875rem;color:var(--text-muted);">
+    <input type="checkbox" id="selectAll" onchange="toggleAll(this)" style="accent-color:var(--accent);">
+    Select all visible
+  </label>
+  <button class="btn btn-primary" id="huntBtn" onclick="hunt()" disabled>
+    Snatch selected
+  </button>
+  <span id="huntStatus" style="font-size:0.8rem;color:var(--text-muted);"></span>
+</div>
+
+<!-- Scenes -->
+<div id="sceneList">
+{% for s in scenes %}
+<div class="scene-row" data-status="{{ s.status }}"
+     style="display:flex;align-items:center;gap:0.75rem;
+            padding:0.6rem 0.75rem;margin-bottom:0.4rem;
+            background:var(--surface);border:1px solid var(--border);
+            border-radius:var(--radius);transition:border-color 0.15s;"
+     id="row-{{ s.code }}">
+
+  <!-- Checkbox (only for missing/not_found) -->
+  <div style="flex-shrink:0;width:18px;">
+    {% if s.status in ('missing', 'not_found') %}
+    <input type="checkbox" class="scene-check" value="{{ s.code }}"
+           data-wid="{{ s.wid }}" data-title="{{ s.title | e }}"
+           onchange="updateHuntBtn()"
+           style="accent-color:var(--accent);width:15px;height:15px;cursor:pointer;">
+    {% endif %}
+  </div>
+
+  <!-- Thumbnail -->
+  <div style="flex-shrink:0;width:96px;height:54px;border-radius:4px;overflow:hidden;background:var(--surface2);">
+    {% if s.thumb %}
+    <img class="scene-thumb" src="{{ s.thumb }}" alt=""
+         style="width:100%;height:100%;object-fit:cover;display:block;transition:filter 0.2s;"
+         onerror="this.style.display='none'">
+    {% endif %}
+  </div>
+
+  <!-- Info -->
+  <div style="flex:1;min-width:0;">
+    <div style="font-size:0.9rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+      {{ s.title }}
+    </div>
+    <div style="font-size:0.775rem;color:var(--text-muted);margin-top:0.15rem;display:flex;gap:0.75rem;flex-wrap:wrap;">
+      <span style="color:var(--accent);font-weight:600;">{{ s.code }}</span>
+      <span>{{ s.studio }}</span>
+      {% if s.year %}<span>{{ s.year }}</span>{% endif %}
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div style="flex-shrink:0;" id="status-{{ s.code }}">
+    <span class="badge badge-{{ s.status }}">
+      {% if s.status == 'have' %}Have
+      {% elif s.status == 'missing' %}Missing
+      {% elif s.status == 'queued' %}Queued
+      {% elif s.status == 'not_found' %}Not found
+      {% elif s.status == 'imported' %}Imported
+      {% endif %}
+    </span>
+  </div>
+
+</div>
+{% endfor %}
+</div>
+
+<!-- Hunt progress log -->
+<div id="huntLog" style="display:none;margin-top:1.5rem;background:var(--surface);
+     border:1px solid var(--border);border-radius:var(--radius);padding:1rem;
+     font-family:monospace;font-size:0.8rem;max-height:300px;overflow-y:auto;"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+var currentFilter = 'all';
+
+function setFilter(f, btn) {
+  currentFilter = f;
+  document.querySelectorAll('#filterTabs button').forEach(b => {
+    b.className = 'btn btn-secondary';
+  });
+  btn.className = 'btn btn-primary';
+  document.querySelectorAll('.scene-row').forEach(row => {
+    var status = row.dataset.status;
+    var show = f === 'all' || status === f;
+    row.style.display = show ? 'flex' : 'none';
+  });
+  updateHuntBtn();
+}
+
+function toggleAll(cb) {
+  document.querySelectorAll('.scene-check').forEach(el => {
+    var row = el.closest('.scene-row');
+    if (row.style.display !== 'none') el.checked = cb.checked;
+  });
+  updateHuntBtn();
+}
+
+function updateHuntBtn() {
+  var n = document.querySelectorAll('.scene-check:checked').length;
+  var btn = document.getElementById('huntBtn');
+  btn.disabled = n === 0;
+  btn.textContent = n > 0 ? 'Snatch ' + n + ' scene' + (n > 1 ? 's' : '') : 'Snatch selected';
+}
+
+function hunt() {
+  var checked = [...document.querySelectorAll('.scene-check:checked')];
+  if (!checked.length) return;
+
+  var items = checked.map(el => ({
+    code:  el.value,
+    wid:   parseInt(el.dataset.wid),
+    title: el.dataset.title,
+  }));
+
+  document.getElementById('huntBtn').disabled = true;
+  document.getElementById('huntStatus').textContent = 'Searching…';
+  var log = document.getElementById('huntLog');
+  log.style.display = 'block';
+  log.innerHTML = '';
+
+  var es = new EventSource('/hunt?' + new URLSearchParams({dummy: Date.now()}));
+
+  // We can't POST with EventSource — use fetch + ReadableStream instead
+  es.close();
+
+  fetch('/hunt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({items: items}),
+  }).then(resp => {
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = '';
+
+    function read() {
+      reader.read().then(({done, value}) => {
+        if (done) {
+          document.getElementById('huntStatus').textContent = 'Done.';
+          document.getElementById('huntBtn').disabled = false;
+          return;
+        }
+        buf += decoder.decode(value, {stream: true});
+        var lines = buf.split('\n');
+        buf = lines.pop();
+        lines.forEach(line => {
+          if (!line.startsWith('data: ')) return;
+          var msg = JSON.parse(line.slice(6));
+          if (msg.done) return;
+          logMsg(msg);
+          updateRow(msg);
+        });
+        read();
+      });
+    }
+    read();
+  });
+}
+
+function logMsg(msg) {
+  var log = document.getElementById('huntLog');
+  var line = document.createElement('div');
+  var icons = {searching:'⟳', found:'✓', not_found:'✗', queued:'→', failed:'✗'};
+  var colors = {searching:'var(--text-muted)', found:'var(--green)', not_found:'var(--red)', queued:'var(--accent)', failed:'var(--red)'};
+  line.style.color = colors[msg.status] || 'var(--text)';
+  var txt = (icons[msg.status] || '') + ' [' + msg.code + '] ' + msg.status;
+  if (msg.release) txt += ' — ' + msg.release;
+  if (msg.mb) txt += ' (' + msg.mb + 'MB)';
+  line.textContent = txt;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function updateRow(msg) {
+  var statusEl = document.getElementById('status-' + msg.code);
+  var row = document.getElementById('row-' + msg.code);
+  if (!statusEl || !row) return;
+
+  var map = {
+    searching:  {cls: 'badge-queued',  txt: 'Searching…'},
+    found:      {cls: 'badge-queued',  txt: 'Found'},
+    queued:     {cls: 'badge-queued',  txt: 'Queued'},
+    not_found:  {cls: 'badge-not_found', txt: 'Not found'},
+    failed:     {cls: 'badge-not_found', txt: 'Failed'},
+  };
+  var m = map[msg.status];
+  if (m) {
+    statusEl.innerHTML = '<span class="badge ' + m.cls + '">' + m.txt + '</span>';
+    row.dataset.status = msg.status === 'queued' ? 'queued' : row.dataset.status;
+    // Remove checkbox once queued
+    if (msg.status === 'queued') {
+      var cb = row.querySelector('.scene-check');
+      if (cb) cb.closest('div').innerHTML = '';
+    }
+  }
+}
+</script>
+{% endblock %}

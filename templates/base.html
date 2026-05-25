@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Snatcharr{% block title %}{% endblock %}</title>
+<style>
+:root {
+  --bg:          #0a1628;
+  --surface:     #0f2040;
+  --surface2:    #162a50;
+  --border:      rgba(22,51,82,0.8);
+  --accent:      #3b82f6;
+  --accent2:     #1d4ed8;
+  --text:        #e2e8f0;
+  --text-muted:  #64748b;
+  --green:       #22c55e;
+  --amber:       #f59e0b;
+  --red:         #ef4444;
+  --radius:      8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 0.9375rem; min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: #60a5fa; }
+
+nav {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  height: 52px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.nav-brand {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+.nav-brand span { color: var(--accent); }
+.nav-links { display: flex; gap: 1.5rem; }
+.nav-links a { color: var(--text-muted); font-size: 0.875rem; transition: color 0.15s; }
+.nav-links a:hover, .nav-links a.active { color: var(--text); }
+
+.container { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.5rem 1rem; border-radius: var(--radius);
+  font-size: 0.875rem; font-weight: 500; cursor: pointer;
+  border: none; transition: all 0.15s;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: rgba(59,130,246,0.1); border-color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.badge {
+  display: inline-block; padding: 0.15rem 0.5rem;
+  border-radius: 4px; font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.badge-have      { background: rgba(34,197,94,0.15);  color: var(--green); }
+.badge-missing   { background: rgba(100,116,139,0.15); color: var(--text-muted); }
+.badge-queued    { background: rgba(245,158,11,0.15);  color: var(--amber); }
+.badge-not_found { background: rgba(239,68,68,0.1);    color: var(--red); opacity: 0.6; }
+.badge-imported  { background: rgba(59,130,246,0.15);  color: var(--accent); }
+
+.page-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap;
+}
+.page-title { font-size: 1.375rem; font-weight: 700; }
+
+.blur-toggle {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.4rem 0.75rem; border-radius: var(--radius);
+  font-size: 0.8rem; cursor: pointer;
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text-muted); transition: all 0.15s;
+  user-select: none;
+}
+.blur-toggle:hover { color: var(--text); border-color: var(--accent); }
+.blur-toggle svg { width: 14px; height: 14px; }
+
+.thumbs-blurred img.scene-thumb { filter: blur(12px); }
+
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<nav>
+  <span class="nav-brand">Snatch<span>arr</span></span>
+  <div class="nav-links">
+    <a href="/" {% if request.endpoint == 'index' %}class="active"{% endif %}>Performers</a>
+    <a href="/studios" {% if request.endpoint == 'studios' %}class="active"{% endif %}>Studios</a>
+    <a href="/queue" {% if request.endpoint == 'queue_page' %}class="active"{% endif %}>Queue</a>
+    <a href="/settings" {% if request.endpoint == 'settings' %}class="active"{% endif %}>Settings</a>
+  </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem;">
+    <button class="blur-toggle" id="syncBtn" onclick="syncLibrary()" title="Sync with Whisparr inventory">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;">
+        <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      <span id="syncLabel">Sync</span>
+    </button>
+    <button class="blur-toggle" onclick="toggleBlur()" id="navBlurBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72 1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+      </svg>
+      <span id="blurLabel">Blur</span>
+    </button>
+  </div>
+</nav>
+<div class="container">
+{% block content %}{% endblock %}
+</div>
+<script>
+// Sync with Whisparr
+window.syncLibrary = function() {
+  var btn = document.getElementById('syncBtn');
+  var lbl = document.getElementById('syncLabel');
+  lbl.textContent = 'Syncing…';
+  btn.disabled = true;
+  fetch('/api/sync', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      lbl.textContent = d.count > 0 ? ('✓ ' + d.count + ' updated') : '✓ Up to date';
+      btn.disabled = false;
+      if (d.count > 0) setTimeout(() => location.reload(), 800);
+      else setTimeout(() => { lbl.textContent = 'Sync'; }, 2000);
+    })
+    .catch(() => { lbl.textContent = 'Sync'; btn.disabled = false; });
+};
+
+// Blur toggle — persists in localStorage
+(function() {
+  var blurred = localStorage.getItem('snatcharr_blur') !== 'false';
+  function apply() {
+    document.body.classList.toggle('thumbs-blurred', blurred);
+  }
+  apply();
+  window.toggleBlur = function() {
+    blurred = !blurred;
+    localStorage.setItem('snatcharr_blur', blurred);
+    apply();
+    var el = document.getElementById('blurLabel');
+    if (el) el.textContent = blurred ? 'Unblur' : 'Blur';
+  };
+  document.addEventListener('DOMContentLoaded', function() {
+    var el = document.getElementById('blurLabel');
+    if (el) el.textContent = blurred ? 'Unblur' : 'Blur';
+  });
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
