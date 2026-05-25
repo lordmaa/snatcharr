@@ -9,6 +9,6 @@ services:
       - WHISPARR_DB=/whisparr-config/whisparr3.db
       - SNATCHARR_DATA=/data
     volumes:
-      - /home/rob/snatcharr/data:/data
+      - /portainer/files/appdata/config/snatcharr:/data
       - /portainer/files/appdata/config/whisparrv3:/whisparr-config:ro
       - /mnt/nas/downloads:/mnt/nas/downloads

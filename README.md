@@ -27,7 +27,7 @@ services:
       - WHISPARR_DB=/whisparr-config/whisparr3.db
       - SNATCHARR_DATA=/data
     volumes:
-      - snatcharr-data:/data
+      - /portainer/files/appdata/config/snatcharr:/data
       - /portainer/files/appdata/config/whisparrv3:/whisparr-config:ro
       - /mnt/nas/downloads:/mnt/nas/downloads
 
@@ -47,7 +47,7 @@ volumes:
 | Mount | Purpose |
 |---|---|
 | `/whisparr-config` | Whisparr config dir (read-only) — contains the database |
-| `/data` | Persistent state and settings |
+| `/portainer/files/appdata/config/snatcharr` → `/data` | Persistent state and settings |
 | `/mnt/nas/downloads` | Must match the download path SABnzbd/qBittorrent write to |
 
 ## Settings
