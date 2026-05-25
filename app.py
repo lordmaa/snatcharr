@@ -286,11 +286,23 @@ def search_prowlarr(code):
     return best_nzb, best_torrent
 
 def add_to_sabnzbd(nzb_url, nzb_name):
-    try:
-        nzb_resp = requests.get(nzb_url, timeout=30)
-        nzb_resp.raise_for_status()
-    except Exception as e:
-        log.warning('sabnzbd: failed to download NZB for %s: %s', nzb_name, e)
+    nzb_resp = None
+    for attempt in range(3):
+        try:
+            nzb_resp = requests.get(nzb_url, timeout=30)
+            if nzb_resp.status_code == 429:
+                wait = 15 * (attempt + 1)
+                log.warning('sabnzbd: 429 from indexer for %s, waiting %ds (attempt %d/3)', nzb_name, wait, attempt + 1)
+                time.sleep(wait)
+                nzb_resp = None
+                continue
+            nzb_resp.raise_for_status()
+            break
+        except Exception as e:
+            log.warning('sabnzbd: failed to download NZB for %s: %s', nzb_name, e)
+            return None
+    if nzb_resp is None:
+        log.warning('sabnzbd: gave up downloading NZB for %s after 3 attempts', nzb_name)
         return None
     content = nzb_resp.content
     ct = nzb_resp.headers.get('Content-Type', '')
