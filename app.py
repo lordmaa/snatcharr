@@ -189,8 +189,16 @@ def get_performers(active_studios):
               AND m.Monitored = 1
         ''', [p['ForeignId']] + studios).fetchall()
         valid   = [r for r in rows if CODE_RE.match(str(r['Code'] or '').strip())]
-        have    = sum(1 for r in valid if r['MovieFileId'])
-        missing = sum(1 for r in valid if not r['MovieFileId'])
+        all_rows = conn.execute('''
+            SELECT m.MovieFileId
+            FROM Credits c
+            JOIN MovieMetadata mm ON mm.Id = c.MovieMetadataId
+            JOIN Movies m ON m.MovieMetadataId = mm.Id
+            WHERE c.PerformerForeignId = ?
+              AND m.Monitored = 1
+        ''', [p['ForeignId']]).fetchall()
+        have    = sum(1 for r in all_rows if r['MovieFileId'])
+        missing = sum(1 for r in all_rows if not r['MovieFileId'])
         queued  = sum(1 for r in valid if not r['MovieFileId'] and str(r['Code']).upper() in queued_codes)
         headshot = None
         try:
