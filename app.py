@@ -189,7 +189,7 @@ def get_performers(active_studios):
                            'have': have, 'missing': missing, 'queued': queued,
                            'headshot': headshot})
     conn.close()
-    performers.sort(key=lambda p: p['missing'], reverse=True)
+    performers.sort(key=lambda p: p['name'].lower())
     return performers
 
 def get_scenes(performer_name, active_studios):
