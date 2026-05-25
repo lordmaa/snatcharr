@@ -243,9 +243,9 @@ def get_scenes(performer_name, active_studios):
     return scenes
 
 def search_prowlarr(code):
-    """Return (best_nzb, best_torrent) — either may be None."""
-    best_nzb = None
-    best_torrent = None
+    """Return (nzb_list, torrent_list) sorted by size desc — all candidates from all indexers."""
+    nzbs = []
+    torrents = []
     for idx_id in get_prowlarr_indexers():
         try:
             r = requests.get(f'{PROWLARR_URL}/{idx_id}/api', params={
@@ -276,14 +276,14 @@ def search_prowlarr(code):
                 )
                 result = {'title': title, 'url': link, 'size': size, 'indexer': idx_id}
                 if is_torrent:
-                    if best_torrent is None or size > best_torrent['size']:
-                        best_torrent = result
+                    torrents.append(result)
                 else:
-                    if best_nzb is None or size > best_nzb['size']:
-                        best_nzb = result
+                    nzbs.append(result)
         except Exception:
             pass
-    return best_nzb, best_torrent
+    nzbs.sort(key=lambda x: x['size'], reverse=True)
+    torrents.sort(key=lambda x: x['size'], reverse=True)
+    return nzbs, torrents
 
 def add_to_sabnzbd(nzb_url, nzb_name):
     nzb_resp = None
@@ -496,28 +496,31 @@ def hunt():
             wid   = item['wid']
             title = item['title']
             yield f"data: {json.dumps({'code': code, 'status': 'searching'})}\n\n"
-            nzb_result, torrent_result = search_prowlarr(code)
-            if not nzb_result and not torrent_result:
+            nzb_results, torrent_results = search_prowlarr(code)
+            if not nzb_results and not torrent_results:
                 if code not in state['not_found']:
                     state['not_found'].append(code)
                 save_state(state)
                 yield f"data: {json.dumps({'code': code, 'status': 'not_found'})}\n\n"
                 continue
-            result = nzb_result or torrent_result
-            mb = result['size'] // 1024 // 1024 if result['size'] else 0
-            yield f"data: {json.dumps({'code': code, 'status': 'found', 'release': result['title'][:70], 'mb': mb})}\n\n"
-            # Priority: NZB → SABnzbd, fallback torrent → qBittorrent
-            nzo_id = client = None
-            if nzb_result:
-                nzo_id = add_to_sabnzbd(nzb_result['url'], code)
+            best = (nzb_results or torrent_results)[0]
+            mb = best['size'] // 1024 // 1024 if best['size'] else 0
+            yield f"data: {json.dumps({'code': code, 'status': 'found', 'release': best['title'][:70], 'mb': mb})}\n\n"
+            # Try every NZB in size order, then every torrent
+            nzo_id = client = result = None
+            for candidate in nzb_results:
+                nzo_id = add_to_sabnzbd(candidate['url'], code)
                 if nzo_id:
                     client = 'sabnzbd'
-                    result = nzb_result
-            if not nzo_id and torrent_result:
-                nzo_id = add_to_qbittorrent(torrent_result['url'], code)
-                if nzo_id:
-                    client = 'qbittorrent'
-                    result = torrent_result
+                    result = candidate
+                    break
+            if not nzo_id:
+                for candidate in torrent_results:
+                    nzo_id = add_to_qbittorrent(candidate['url'], code)
+                    if nzo_id:
+                        client = 'qbittorrent'
+                        result = candidate
+                        break
             if nzo_id:
                 state['queued'][code] = {'nzo_id': nzo_id, 'wid': wid, 'title': title,
                                          'release': result['title'], 'client': client}
@@ -777,8 +780,8 @@ def _run_auto_snatch():
                 nf_codes.discard(code)
 
             log.info('auto-snatch: searching %s (%s)', code, p['Name'])
-            nzb_result, torrent_result = search_prowlarr(code)
-            if not nzb_result and not torrent_result:
+            nzb_results, torrent_results = search_prowlarr(code)
+            if not nzb_results and not torrent_results:
                 if code not in state['not_found']:
                     state['not_found'].append(code)
                 state['not_found_at'][code] = time.strftime('%Y-%m-%dT%H:%M:%S')
@@ -787,19 +790,20 @@ def _run_auto_snatch():
                 log.info('auto-snatch: %s not found', code)
                 continue
 
-            # Priority: NZB → SABnzbd, fallback torrent → qBittorrent
-            nzo_id = dl_client = None
-            result = None
-            if nzb_result:
-                nzo_id = add_to_sabnzbd(nzb_result['url'], code)
+            nzo_id = dl_client = result = None
+            for candidate in nzb_results:
+                nzo_id = add_to_sabnzbd(candidate['url'], code)
                 if nzo_id:
                     dl_client = 'sabnzbd'
-                    result = nzb_result
-            if not nzo_id and torrent_result:
-                nzo_id = add_to_qbittorrent(torrent_result['url'], code)
-                if nzo_id:
-                    dl_client = 'qbittorrent'
-                    result = torrent_result
+                    result = candidate
+                    break
+            if not nzo_id:
+                for candidate in torrent_results:
+                    nzo_id = add_to_qbittorrent(candidate['url'], code)
+                    if nzo_id:
+                        dl_client = 'qbittorrent'
+                        result = candidate
+                        break
             if nzo_id:
                 state['queued'][code] = {'nzo_id': nzo_id, 'wid': r['wid'],
                                          'title': r['Title'] or code,
