@@ -531,15 +531,20 @@ def _cleanup_downloads_dir():
                 log.warning('cleanup: failed to remove %s: %s', d.name, e)
 
 PREFERRED_TUBE_SITES = ('tnaflix.com', 'porntrex.com')
+TUBE_DOMAINS = {
+    'tnaflix.com', 'porntrex.com', 'analvids.com', 'xvideos.com',
+    'xhamster.com', 'pornhub.com', 'youporn.com', 'redtube.com',
+    'porndoe.com', 'eporner.com', 'tubegalore.com', 'drtuber.com',
+    'txxx.com', 'hclips.com', 'anysex.com', 'beeg.com',
+}
 
 def search_tube(code):
-    """DDG HTML search for code; return candidate URLs, preferred sites first."""
+    """DDG HTML search for code; return candidate URLs from known tube sites only."""
     try:
         r = requests.get('https://html.duckduckgo.com/html/',
                          params={'q': code},
                          headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
                          timeout=10)
-        # Match result__a hrefs regardless of attribute order
         raw = re.findall(
             r'href=["\']([^"\']+)["\'][^>]*class="result__a"|class="result__a"[^>]*href=["\']([^"\']+)["\']',
             r.text)
@@ -555,8 +560,11 @@ def search_tube(code):
                     href = qs['uddg'][0]
                 else:
                     continue
-            if href.startswith('http'):
-                urls.append(href)
+            if not href.startswith('http'):
+                continue
+            if not any(d in href for d in TUBE_DOMAINS):
+                continue
+            urls.append(href)
         urls.sort(key=lambda u: not any(s in u for s in PREFERRED_TUBE_SITES))
         return urls[:5]
     except Exception:
