@@ -997,19 +997,21 @@ def api_manual_import():
         dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
         dl_dir  = Path(dl_base) / code
         state['queued'][code] = {
-            'nzo_id':     f'ytdlp_{code}',
-            'wid':        wid,
-            'title':      title,
-            'release':    url[:80],
-            'client':     'ytdlp',
-            'dl_path':    str(dl_dir),
-            'started_at': time.time(),
+            'nzo_id':        f'ytdlp_{code}',
+            'wid':           wid,
+            'title':         title,
+            'release':       url[:80],
+            'client':        'ytdlp',
+            'dl_path':       str(dl_dir),
+            'ytdlp_url':     url,
+            'ytdlp_retries': 0,
+            'started_at':    time.time(),
         }
         if code in state['not_found']:
             state['not_found'].remove(code)
         save_state(state)
         threading.Thread(target=_ytdlp_worker, args=(code, [url], dl_dir),
-                         daemon=True, name=f'ytdlp-manual-{code}').start()
+                         daemon=True, name=f'ytdlp-{code}').start()
         log.info('manual-import %s: yt-dlp queued — %s', code, url[:60])
         return jsonify({'ok': True, 'msg': f'yt-dlp download started for {code}'})
 
@@ -1122,13 +1124,15 @@ def _run_auto_snatch_inner():
                     dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
                     dl_dir  = Path(dl_base) / code
                     state['queued'][code] = {
-                        'nzo_id':     f'ytdlp_{code}',
-                        'wid':        r['wid'],
-                        'title':      r['Title'] or code,
-                        'release':    urls[0][:80],
-                        'client':     'ytdlp',
-                        'dl_path':    str(dl_dir),
-                        'started_at': time.time(),
+                        'nzo_id':       f'ytdlp_{code}',
+                        'wid':          r['wid'],
+                        'title':        r['Title'] or code,
+                        'release':      urls[0][:80],
+                        'client':       'ytdlp',
+                        'dl_path':      str(dl_dir),
+                        'ytdlp_url':    urls[0],
+                        'ytdlp_retries': 0,
+                        'started_at':   time.time(),
                     }
                     queued.add(code)
                     changed = True
@@ -1171,13 +1175,15 @@ def _run_auto_snatch_inner():
                     dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
                     dl_dir  = Path(dl_base) / code
                     state['queued'][code] = {
-                        'nzo_id':     f'ytdlp_{code}',
-                        'wid':        r['wid'],
-                        'title':      r['Title'] or code,
-                        'release':    urls[0][:80],
-                        'client':     'ytdlp',
-                        'dl_path':    str(dl_dir),
-                        'started_at': time.time(),
+                        'nzo_id':        f'ytdlp_{code}',
+                        'wid':           r['wid'],
+                        'title':         r['Title'] or code,
+                        'release':       urls[0][:80],
+                        'client':        'ytdlp',
+                        'dl_path':       str(dl_dir),
+                        'ytdlp_url':     urls[0],
+                        'ytdlp_retries': 0,
+                        'started_at':    time.time(),
                     }
                     queued.add(code)
                     changed = True
@@ -1210,9 +1216,8 @@ def _auto_import_loop():
                 client = info.get('client', 'sabnzbd')
 
                 if client == 'ytdlp':
-                    dl_path    = info.get('dl_path', '')
-                    started_at = info.get('started_at', 0)
-                    video      = find_video_file(dl_path) if dl_path else None
+                    dl_path = info.get('dl_path', '')
+                    video   = find_video_file(dl_path) if dl_path else None
                     if video:
                         ok = whisparr_manual_import(video, info['wid'])
                         if ok:
@@ -1222,8 +1227,25 @@ def _auto_import_loop():
                             changed = True
                         else:
                             log.warning('auto-import %s: ytdlp Whisparr import failed', code)
-                    elif time.time() - started_at > 7200:
-                        log.warning('auto-import %s: ytdlp timed out after 2h', code)
+                        continue
+                    # No video yet — check if the thread is still alive
+                    active_names  = {t.name for t in threading.enumerate()}
+                    thread_alive  = f'ytdlp-{code}' in active_names
+                    if thread_alive:
+                        continue  # still downloading, leave it
+                    # Thread is dead and no video produced — retry or give up
+                    retries   = info.get('ytdlp_retries', 0)
+                    ytdlp_url = info.get('ytdlp_url', '')
+                    if retries < 3 and ytdlp_url:
+                        info['ytdlp_retries'] = retries + 1
+                        info['started_at']    = time.time()
+                        dl_dir = Path(dl_path or str(_DATA_DIR / 'ytdlp' / code))
+                        threading.Thread(target=_ytdlp_worker, args=(code, [ytdlp_url], dl_dir),
+                                         daemon=True, name=f'ytdlp-{code}').start()
+                        log.info('auto-import %s: ytdlp retry %d/3', code, retries + 1)
+                        changed = True
+                    else:
+                        log.warning('auto-import %s: ytdlp gave up after %d retries', code, retries)
                         state.setdefault('failed', [])
                         if code not in state['failed']:
                             state['failed'].append(code)
