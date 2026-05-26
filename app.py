@@ -544,9 +544,22 @@ _TUBE_HEADERS = {
     'Accept-Language': 'en-GB,en;q=0.9',
 }
 
+# Domains confirmed working with yt-dlp — used to validate manual URLs too
+YTDLP_SUPPORTED_DOMAINS = {
+    'tnaflix.com', 'porntrex.com', 'xvideos.com', 'xnxx.com',
+    'xhamster.com', 'eporner.com', 'pornhub.com', 'redtube.com',
+    'tube8.com', 'youporn.com', 'spankbang.com',
+}
+
+def _tube_domain(url):
+    m = re.search(r'https?://(?:www\.)?([^/]+)', url)
+    return m.group(1).lower() if m else ''
+
 def search_tube(code):
-    """Search tnaflix for code; return video page URLs that contain the code."""
+    """Search tnaflix and porntrex for code; return yt-dlp-compatible video page URLs."""
     urls = []
+    seen = set()
+
     # tnaflix
     try:
         r = requests.get('https://www.tnaflix.com/search.php',
@@ -554,7 +567,6 @@ def search_tube(code):
                          headers={**_TUBE_HEADERS, 'Referer': 'https://www.tnaflix.com/'},
                          timeout=10)
         raw = re.findall(r'href="(https://www\.tnaflix\.com/[^"]+/video\d+[^"]*)"', r.text)
-        seen = set()
         for u in raw:
             u = u.split('"')[0]
             if u not in seen and code.upper() in u.upper():
@@ -562,7 +574,23 @@ def search_tube(code):
                 urls.append(u)
     except Exception as e:
         log.debug('search_tube tnaflix error: %s', e)
-    return urls[:5]
+
+    # porntrex
+    try:
+        r = requests.get('https://www.porntrex.com/search/',
+                         params={'search_query': code},
+                         headers={**_TUBE_HEADERS, 'Referer': 'https://www.porntrex.com/'},
+                         timeout=10)
+        raw = re.findall(r'href="(https://www\.porntrex\.com/video/[^"]+)"', r.text)
+        for u in raw:
+            u = u.split('"')[0]
+            if u not in seen and code.upper() in u.upper():
+                seen.add(u)
+                urls.append(u)
+    except Exception as e:
+        log.debug('search_tube porntrex error: %s', e)
+
+    return urls[:8]
 
 def _ytdlp_worker(code, urls, dl_dir):
     """Try each URL with yt-dlp; download >=480p to dl_dir. Runs in background thread."""
@@ -994,6 +1022,10 @@ def api_manual_import():
     state = load_state()
 
     if url:
+        domain = _tube_domain(url)
+        if not any(domain == d or domain.endswith('.' + d) for d in YTDLP_SUPPORTED_DOMAINS):
+            return jsonify({'ok': False,
+                            'msg': f'{domain} is not supported by yt-dlp — try a different site'})
         dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
         dl_dir  = Path(dl_base) / code
         state['queued'][code] = {
