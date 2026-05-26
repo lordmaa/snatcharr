@@ -1233,24 +1233,25 @@ def _auto_import_loop():
                     thread_alive  = f'ytdlp-{code}' in active_names
                     if thread_alive:
                         continue  # still downloading, leave it
-                    # Thread is dead and no video produced — retry or give up
-                    retries   = info.get('ytdlp_retries', 0)
-                    ytdlp_url = info.get('ytdlp_url', '')
-                    if retries < 3 and ytdlp_url:
-                        info['ytdlp_retries'] = retries + 1
-                        info['started_at']    = time.time()
-                        dl_dir = Path(dl_path or str(_DATA_DIR / 'ytdlp' / code))
-                        threading.Thread(target=_ytdlp_worker, args=(code, [ytdlp_url], dl_dir),
-                                         daemon=True, name=f'ytdlp-{code}').start()
-                        log.info('auto-import %s: ytdlp retry %d/3', code, retries + 1)
-                        changed = True
-                    else:
-                        log.warning('auto-import %s: ytdlp gave up after %d retries', code, retries)
-                        state.setdefault('failed', [])
-                        if code not in state['failed']:
-                            state['failed'].append(code)
+                    # Thread is dead and no video — retry indefinitely (30 min cooldown)
+                    ytdlp_url  = info.get('ytdlp_url', '')
+                    started_at = info.get('started_at', 0)
+                    if not ytdlp_url:
+                        # No URL stored (legacy entry) — can't retry, drop it
+                        log.warning('auto-import %s: ytdlp no URL stored, removing', code)
                         del state['queued'][code]
                         changed = True
+                        continue
+                    if time.time() - started_at < 1800:
+                        continue  # cooldown — wait 30 min between attempts
+                    retries = info.get('ytdlp_retries', 0) + 1
+                    info['ytdlp_retries'] = retries
+                    info['started_at']    = time.time()
+                    dl_dir = Path(dl_path or str(_DATA_DIR / 'ytdlp' / code))
+                    threading.Thread(target=_ytdlp_worker, args=(code, [ytdlp_url], dl_dir),
+                                     daemon=True, name=f'ytdlp-{code}').start()
+                    log.info('auto-import %s: ytdlp retry #%d (will keep trying)', code, retries)
+                    changed = True
                     continue
 
                 completed = sab_done if client == 'sabnzbd' else qbit_done
