@@ -947,6 +947,91 @@ def api_wipe_queue():
     save_state(state)
     return jsonify({'ok': True, 'wiped': wiped})
 
+@app.route('/manual/<code>')
+def manual_page(code):
+    code = code.upper()
+    try:
+        conn = db_connect()
+        row = conn.execute('''
+            SELECT m.Id as wid, mm.Title, mm.StudioTitle
+            FROM Movies m
+            JOIN MovieMetadata mm ON m.MovieMetadataId = mm.Id
+            WHERE mm.Code = ? AND m.Monitored = 1
+            LIMIT 1
+        ''', (code,)).fetchone()
+        if not row:
+            conn.close()
+            return f'Scene {code} not found in Whisparr', 404
+        wid = row['wid']
+        performers = conn.execute('''
+            SELECT p.Name FROM Credits c
+            JOIN Performers p ON p.ForeignId = c.PerformerForeignId
+            JOIN Movies m ON m.MovieMetadataId = c.MovieMetadataId
+            WHERE m.Id = ? AND p.Monitored = 1
+        ''', (wid,)).fetchall()
+        conn.close()
+        performer_names = [p['Name'] for p in performers]
+    except Exception as e:
+        log.warning('manual_page %s: %s', code, e)
+        return f'DB error: {e}', 500
+    return render_template('manual.html', code=code, wid=wid,
+                           title=row['Title'] or code,
+                           studio=row['StudioTitle'] or '',
+                           performer_names=performer_names)
+
+@app.route('/api/manual-import', methods=['POST'])
+def api_manual_import():
+    data = request.get_json()
+    code      = (data.get('code') or '').upper()
+    wid       = data.get('wid')
+    url       = (data.get('url') or '').strip()
+    file_path = (data.get('file_path') or '').strip()
+    title     = (data.get('title') or code)
+
+    if not code or not wid:
+        return jsonify({'ok': False, 'msg': 'code and wid required'})
+
+    state = load_state()
+
+    if url:
+        dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
+        dl_dir  = Path(dl_base) / code
+        state['queued'][code] = {
+            'nzo_id':     f'ytdlp_{code}',
+            'wid':        wid,
+            'title':      title,
+            'release':    url[:80],
+            'client':     'ytdlp',
+            'dl_path':    str(dl_dir),
+            'started_at': time.time(),
+        }
+        if code in state['not_found']:
+            state['not_found'].remove(code)
+        save_state(state)
+        threading.Thread(target=_ytdlp_worker, args=(code, [url], dl_dir),
+                         daemon=True, name=f'ytdlp-manual-{code}').start()
+        log.info('manual-import %s: yt-dlp queued — %s', code, url[:60])
+        return jsonify({'ok': True, 'msg': f'yt-dlp download started for {code}'})
+
+    if file_path:
+        p = Path(file_path)
+        if not p.exists():
+            return jsonify({'ok': False, 'msg': f'File not found: {file_path}'})
+        if p.suffix.lower() not in VIDEO_EXTS:
+            return jsonify({'ok': False, 'msg': f'Not a recognised video file: {p.suffix}'})
+        ok = whisparr_manual_import(file_path, wid)
+        if ok:
+            if code in state['not_found']:
+                state['not_found'].remove(code)
+            if code not in state['imported']:
+                state['imported'].append(code)
+            save_state(state)
+            log.info('manual-import %s: imported from %s', code, file_path)
+            return jsonify({'ok': True, 'msg': f'Imported {p.name}'})
+        return jsonify({'ok': False, 'msg': 'Whisparr import failed — check logs'})
+
+    return jsonify({'ok': False, 'msg': 'Provide a URL or file path'})
+
 def _auto_snatch_loop():
     try:
         _run_auto_snatch()

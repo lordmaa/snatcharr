@@ -65,7 +65,9 @@
               color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">Not found ({{ not_found|length }})</div>
   <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
     {% for code in not_found %}
-    <span class="badge badge-not_found">{{ code }}</span>
+    <a href="/manual/{{ code }}" style="text-decoration:none;">
+      <span class="badge badge-not_found" style="cursor:pointer;" title="Manual import options">{{ code }}</span>
+    </a>
     {% endfor %}
   </div>
 </div>

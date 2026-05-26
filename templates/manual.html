@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% block title %} — Manual Import{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <a href="/queue" style="color:var(--text-muted);font-size:0.875rem;">← Queue</a>
+    <div>
+      <span style="color:var(--accent);font-weight:700;font-size:1.1rem;">{{ code }}</span>
+      <span style="color:var(--text-muted);margin:0 0.5rem;">·</span>
+      <span style="font-weight:600;">{{ title }}</span>
+    </div>
+    <span class="badge badge-not_found">Not found</span>
+  </div>
+</div>
+
+<div style="margin-bottom:1.5rem;font-size:0.875rem;color:var(--text-muted);">
+  {% if studio %}<span>{{ studio }}</span>{% endif %}
+  {% if performer_names %}
+    {% if studio %}<span style="margin:0 0.5rem;">·</span>{% endif %}
+    Performer{{ 's' if performer_names|length > 1 else '' }}:
+    {% for name in performer_names %}
+      <a href="/performer/{{ name }}">{{ name }}</a>{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  {% endif %}
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;max-width:800px;">
+
+  <!-- yt-dlp URL card -->
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;">
+    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-muted);font-weight:600;margin-bottom:0.6rem;">Download via yt-dlp</div>
+    <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:1rem;line-height:1.5;">
+      Paste a tube site URL. Snatcharr downloads it and imports to Whisparr automatically.
+    </p>
+    <input type="url" id="urlInput" placeholder="https://www.tnaflix.com/…"
+           style="width:100%;background:var(--surface2);border:1px solid var(--border);
+                  color:var(--text);border-radius:6px;padding:0.5rem 0.75rem;
+                  font-size:0.875rem;margin-bottom:0.75rem;outline:none;
+                  transition:border-color 0.15s;"
+           onfocus="this.style.borderColor='var(--accent)'"
+           onblur="this.style.borderColor='var(--border)'">
+    <button class="btn btn-primary" onclick="submitUrl()" id="urlBtn" style="width:100%;">
+      Queue download
+    </button>
+    <div id="urlResult" style="display:none;margin-top:0.75rem;font-size:0.8rem;
+                               font-family:monospace;padding:0.5rem;border-radius:4px;
+                               background:var(--surface2);"></div>
+  </div>
+
+  <!-- File path card -->
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;">
+    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-muted);font-weight:600;margin-bottom:0.6rem;">Import from mounted file</div>
+    <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:1rem;line-height:1.5;">
+      Point to a video file already accessible inside the container. Imported to Whisparr immediately.
+    </p>
+    <input type="text" id="pathInput" placeholder="/mnt/collection/scene.mkv"
+           style="width:100%;background:var(--surface2);border:1px solid var(--border);
+                  color:var(--text);border-radius:6px;padding:0.5rem 0.75rem;
+                  font-size:0.875rem;margin-bottom:0.75rem;outline:none;font-family:monospace;
+                  transition:border-color 0.15s;"
+           onfocus="this.style.borderColor='var(--accent)'"
+           onblur="this.style.borderColor='var(--border)'">
+    <button class="btn btn-primary" onclick="submitPath()" id="pathBtn" style="width:100%;">
+      Import now
+    </button>
+    <div id="pathResult" style="display:none;margin-top:0.75rem;font-size:0.8rem;
+                                font-family:monospace;padding:0.5rem;border-radius:4px;
+                                background:var(--surface2);"></div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+var CODE  = {{ code | tojson }};
+var WID   = {{ wid | tojson }};
+var TITLE = {{ title | tojson }};
+
+function submitUrl() {
+  var url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  var btn = document.getElementById('urlBtn');
+  var res = document.getElementById('urlResult');
+  btn.disabled = true; btn.textContent = 'Queuing…';
+  fetch('/api/manual-import', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: CODE, wid: WID, title: TITLE, url: url}),
+  }).then(r => r.json()).then(d => {
+    res.style.display = 'block';
+    res.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+    res.textContent = (d.ok ? '✓ ' : '✗ ') + d.msg;
+    btn.disabled = false; btn.textContent = 'Queue download';
+    if (d.ok) setTimeout(() => window.location.href = '/queue', 1500);
+  }).catch(() => {
+    res.style.display = 'block'; res.style.color = 'var(--red)';
+    res.textContent = '✗ Request failed';
+    btn.disabled = false; btn.textContent = 'Queue download';
+  });
+}
+
+function submitPath() {
+  var path = document.getElementById('pathInput').value.trim();
+  if (!path) return;
+  var btn = document.getElementById('pathBtn');
+  var res = document.getElementById('pathResult');
+  btn.disabled = true; btn.textContent = 'Importing…';
+  fetch('/api/manual-import', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: CODE, wid: WID, title: TITLE, file_path: path}),
+  }).then(r => r.json()).then(d => {
+    res.style.display = 'block';
+    res.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+    res.textContent = (d.ok ? '✓ ' : '✗ ') + d.msg;
+    btn.disabled = false; btn.textContent = 'Import now';
+    if (d.ok) setTimeout(() => window.location.href = '/queue', 1500);
+  }).catch(() => {
+    res.style.display = 'block'; res.style.color = 'var(--red)';
+    res.textContent = '✗ Request failed';
+    btn.disabled = false; btn.textContent = 'Import now';
+  });
+}
+</script>
+{% endblock %}
