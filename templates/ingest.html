@@ -147,24 +147,37 @@ function renderResults(results) {
     + (counts.failed  ? '<span class="tag tag-failed">' + counts.failed + ' failed</span>'   : '')
     + '</div>';
 
-  var rows = results.map(function(r) {
+  var rows = results.map(function(r, idx) {
     var actionTag = '';
-    if (r.action === 'import')         actionTag = '<span class="tag tag-import">import</span>';
+    if (r.action === 'import')              actionTag = '<span class="tag tag-import">import</span>';
     else if (r.action === 'monitor+import') actionTag = '<span class="tag tag-import">monitor+import</span>';
-    else if (r.action === 'add+import')    actionTag = '<span class="tag tag-add">add+import</span>';
-    else if (r.action === 'skip')          actionTag = '<span class="tag tag-skipped">skip</span>';
+    else if (r.action === 'add+import')     actionTag = '<span class="tag tag-add">add+import</span>';
+    else if (r.action === 'skip')           actionTag = '<span class="tag tag-skipped">skip</span>';
 
     var statusTag = '';
-    if (r.status === 'queued')  statusTag = '<span class="tag tag-queued">Queued →</span>';
+    if (r.status === 'queued')       statusTag = '<span class="tag tag-queued">Queued →</span>';
     else if (r.status === 'skipped') statusTag = '<span class="tag tag-skipped">—</span>';
     else if (r.status === 'failed')  statusTag = '<span class="tag tag-failed">✗ Failed</span>';
 
-    return '<tr>'
-      + '<td class="fname-cell" title="' + esc(r.path) + '">' + esc(r.file) + '</td>'
+    var retryBtn = '';
+    if (r.status === 'failed' && r.path) {
+      var suggested = r.code || '';
+      retryBtn = '<div style="display:flex;gap:0.35rem;margin-top:0.3rem;">'
+        + '<input id="ri-' + idx + '" style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--border);'
+        + 'border-radius:4px;padding:0.2rem 0.4rem;color:var(--text);font-size:0.75rem;" '
+        + 'value="' + esc(suggested) + '" placeholder="search term">'
+        + '<button onclick="retrySingle(' + idx + ',' + JSON.stringify(r.path) + ')" '
+        + 'style="background:var(--accent);color:#fff;border:none;border-radius:4px;'
+        + 'padding:0.2rem 0.5rem;font-size:0.75rem;cursor:pointer;">Retry</button>'
+        + '</div>';
+    }
+
+    return '<tr id="ir-' + idx + '">'
+      + '<td class="fname-cell" title="' + esc(r.path) + '">' + esc(r.file) + retryBtn + '</td>'
       + '<td>' + (r.code ? '<span class="code-mono">' + esc(r.code) + '</span>' : '<span style="color:var(--text-muted)">—</span>') + '</td>'
       + '<td>' + actionTag + '</td>'
-      + '<td>' + statusTag + '</td>'
-      + '<td style="color:var(--text-muted);font-size:0.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(r.note) + '">' + esc(r.note) + '</td>'
+      + '<td id="is-' + idx + '">' + statusTag + '</td>'
+      + '<td style="color:var(--text-muted);font-size:0.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(r.note) + '" id="in-' + idx + '">' + esc(r.note) + '</td>'
       + '</tr>';
   }).join('');
 
@@ -173,6 +186,30 @@ function renderResults(results) {
     + '<table class="result-table"><thead><tr>'
     + '<th>File</th><th>Code</th><th>Action</th><th>Status</th><th>Note</th>'
     + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function retrySingle(idx, videoPath) {
+  var input = document.getElementById('ri-' + idx);
+  var term  = (input ? input.value : '').trim();
+  if (!term) return;
+  var statusCell = document.getElementById('is-' + idx);
+  var noteCell   = document.getElementById('in-' + idx);
+  if (statusCell) statusCell.innerHTML = '<span class="tag tag-queued">…</span>';
+  fetch('/api/ingest-single', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video: videoPath, search_term: term})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      if (statusCell) statusCell.innerHTML = '<span class="tag tag-queued">Queued →</span>';
+      if (noteCell)   noteCell.textContent = d.note || d.title || '';
+      if (input)      input.parentElement.remove();
+    } else {
+      if (statusCell) statusCell.innerHTML = '<span class="tag tag-failed">✗ Failed</span>';
+      if (noteCell)   noteCell.textContent = d.note || d.error || '';
+    }
+  }).catch(function(e) {
+    if (statusCell) statusCell.innerHTML = '<span class="tag tag-failed">✗ Error</span>';
+  });
 }
 
 function esc(s) {

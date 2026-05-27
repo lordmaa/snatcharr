@@ -2253,6 +2253,104 @@ def _start_auto_import():
 
 # ── Ingest folder ─────────────────────────────────────────────────────────────
 
+def _title_from_path(video: Path) -> str:
+    """Extract a human-readable search title from a video filename."""
+    stem = video.stem
+    # Replace separators with spaces
+    s = re.sub(r'[._\-]', ' ', stem)
+    # Remove resolution, codec, format noise
+    s = re.sub(r'\b(1080p|720p|2160p|4k|uhd|hdl|hdr|web[- ]?dl|x264|x265|hevc|avc|mp4|mkv|avi'
+               r'|siterip|pack|xxx|italian|german|french|english|part\d+)\b', ' ', s, flags=re.I)
+    # Remove dates like 2022 03 26 or 22 06 04
+    s = re.sub(r'\b(20\d{2}|19\d{2})\b', ' ', s)
+    s = re.sub(r'\b\d{2}\s+\d{2}\s+\d{2}\b', ' ', s)
+    # Remove scene codes themselves
+    s = re.sub(r'\b[A-Z]{1,4}\d{2,6}\b', ' ', s)
+    # Remove short noise tokens
+    s = re.sub(r'\b\w{1,2}\b', ' ', s)
+    # Collapse whitespace
+    s = ' '.join(s.split())
+    return s[:120]
+
+
+def _ingest_add_import(video: Path, code: str, search_term: str, root_folder, quality_id) -> dict:
+    """
+    Lookup search_term in TPDB, add to Whisparr if needed, then queue import.
+    Returns dict with keys: wid, title, status ('queued'|'failed'), note, action.
+    """
+    r = requests.get(f'{WHISPARR_URL}/api/v3/movie/lookup',
+                     params={'term': search_term},
+                     headers={'X-Api-Key': WHISPARR_KEY}, timeout=15)
+    hits = r.json() if r.ok else []
+    if not hits:
+        return {'status': 'failed', 'note': f'not in TPDB ({search_term})', 'action': 'add+import'}
+
+    movie = hits[0]
+    title = movie.get('title') or search_term
+
+    # If already in library (Whisparr sets id > 0 on lookup results)
+    wid = int(movie.get('id') or 0)
+    if wid:
+        action = 'import'
+    else:
+        movie['rootFolderPath']   = root_folder
+        movie['qualityProfileId'] = quality_id
+        movie['monitored']        = True
+        movie['addOptions']       = {'searchForMovie': False}
+        r2 = requests.post(f'{WHISPARR_URL}/api/v3/movie',
+                           headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                           json=movie, timeout=15)
+        if r2.status_code in (200, 201):
+            wid    = r2.json()['id']
+            action = 'add+import'
+        elif r2.status_code in (400, 409):
+            # Already exists — find the wid by re-searching
+            try:
+                err = r2.json()
+                # Whisparr returns list of errors
+                if isinstance(err, list):
+                    err_msg = ' '.join(e.get('errorMessage','') for e in err)
+                else:
+                    err_msg = str(err)
+            except Exception:
+                err_msg = r2.text[:120]
+            # Try to get existing wid from the library
+            existing = requests.get(f'{WHISPARR_URL}/api/v3/movie/lookup',
+                                    params={'term': search_term},
+                                    headers={'X-Api-Key': WHISPARR_KEY}, timeout=10)
+            for m in (existing.json() if existing.ok else []):
+                if int(m.get('id') or 0) > 0:
+                    wid = int(m['id']); action = 'import'; break
+            if not wid:
+                return {'status': 'failed', 'note': f'already exists but wid not found: {err_msg}',
+                        'action': 'add+import'}
+        else:
+            return {'status': 'failed', 'note': f'add HTTP {r2.status_code}: {r2.text[:80]}',
+                    'action': 'add+import'}
+
+    entry = {'title': title, 'video': str(video), 'wid': wid,
+             'status': 'pending', 'time': time.strftime('%H:%M'), 'action': action}
+    _local_import_log.appendleft(entry)
+    ok = whisparr_manual_import(str(video), wid, _log_entry=entry)
+    return {'wid': wid, 'title': title, 'status': 'queued' if ok else 'failed',
+            'note': title, 'action': action}
+
+
+def _ingest_get_library_config():
+    """Return (root_folder, quality_id) from Whisparr, with fallbacks."""
+    try:
+        wconn = db_connect()
+        ex    = wconn.execute('SELECT Path FROM Movies LIMIT 1').fetchone()
+        wconn.close()
+        root_folder = str(Path(ex['Path']).parent) if ex else '/mnt/user/data/media/xxx'
+        qp = requests.get(f'{WHISPARR_URL}/api/v3/qualityprofile',
+                          headers={'X-Api-Key': WHISPARR_KEY}, timeout=10).json()
+        quality_id = qp[0]['id'] if qp else 1
+        return root_folder, quality_id
+    except Exception:
+        return '/mnt/user/data/media/xxx', 1
+
+
 def _do_ingest_folder(job_id, folder_path):
     job = _ingest_jobs[job_id]
     try:
@@ -2270,9 +2368,7 @@ def _do_ingest_folder(job_id, folder_path):
             job['status'] = 'done'
             return
 
-        # Cache root folder + quality profile once
-        _root_folder = None
-        _quality_id  = None
+        root_folder, quality_id = _ingest_get_library_config()
 
         for i, video in enumerate(videos):
             job['done'] = i + 1
@@ -2321,50 +2417,16 @@ def _do_ingest_folder(job_id, folder_path):
                 res['note']   = title
 
             else:
-                # Not in Whisparr — TPDB lookup → add → import
-                res['action'] = 'add+import'
-                try:
-                    r = requests.get(f'{WHISPARR_URL}/api/v3/movie/lookup',
-                                     params={'term': code},
-                                     headers={'X-Api-Key': WHISPARR_KEY}, timeout=15)
-                    hits = r.json() if r.ok else []
-                    if not hits:
-                        res['status'] = 'failed'; res['note'] = 'not in TPDB'
-                        job['results'].append(res); continue
-
-                    if _root_folder is None:
-                        try:
-                            wconn = db_connect()
-                            ex    = wconn.execute('SELECT Path FROM Movies LIMIT 1').fetchone()
-                            wconn.close()
-                            _root_folder = str(Path(ex['Path']).parent) if ex else '/mnt/user/data/media/xxx'
-                            qp = requests.get(f'{WHISPARR_URL}/api/v3/qualityprofile',
-                                              headers={'X-Api-Key': WHISPARR_KEY}, timeout=10).json()
-                            _quality_id = qp[0]['id'] if qp else 1
-                        except Exception:
-                            _root_folder = '/mnt/user/data/media/xxx'; _quality_id = 1
-
-                    movie = hits[0]
-                    movie['rootFolderPath']   = _root_folder
-                    movie['qualityProfileId'] = _quality_id
-                    movie['monitored']        = True
-                    movie['addOptions']       = {'searchForMovie': False}
-                    r2 = requests.post(f'{WHISPARR_URL}/api/v3/movie',
-                                       headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
-                                       json=movie, timeout=15)
-                    if r2.status_code not in (200, 201):
-                        res['status'] = 'failed'; res['note'] = f'add failed HTTP {r2.status_code}'
-                        job['results'].append(res); continue
-                    wid   = r2.json()['id']
-                    title = movie.get('title') or code
-                    entry = {'title': title, 'video': str(video), 'wid': wid,
-                             'status': 'pending', 'time': time.strftime('%H:%M'), 'action': 'add+import'}
-                    _local_import_log.appendleft(entry)
-                    ok = whisparr_manual_import(str(video), wid, _log_entry=entry)
-                    res['status'] = 'queued' if ok else 'failed'
-                    res['note']   = title
-                except Exception as e:
-                    res['status'] = 'failed'; res['note'] = str(e)
+                # Not in local scenes table — TPDB lookup → add → import
+                # Try code first, then title extracted from filename as fallback
+                result = _ingest_add_import(video, code, code, root_folder, quality_id)
+                if result['status'] == 'failed' and 'not in TPDB' in result['note']:
+                    title_term = _title_from_path(video)
+                    if title_term and title_term.lower() != code.lower():
+                        result = _ingest_add_import(video, code, title_term, root_folder, quality_id)
+                        if result['status'] == 'queued':
+                            result['note'] = f'{result["note"]} (via title)'
+                res.update(result)
 
             job['results'].append(res)
 
@@ -2377,6 +2439,22 @@ def _do_ingest_folder(job_id, folder_path):
 @app.route('/ingest')
 def ingest_page():
     return render_template('ingest.html')
+
+
+@app.route('/api/ingest-single', methods=['POST'])
+def api_ingest_single():
+    """Retry a single file with a user-supplied search term."""
+    d           = request.json or {}
+    video       = d.get('video', '').strip()
+    search_term = d.get('search_term', '').strip()
+    if not video or not search_term:
+        return jsonify({'ok': False, 'error': 'missing video or search_term'}), 400
+    if not Path(video).is_file():
+        return jsonify({'ok': False, 'error': 'file not found'}), 404
+    code = _extract_code(Path(video)) or search_term.upper()
+    root_folder, quality_id = _ingest_get_library_config()
+    result = _ingest_add_import(Path(video), code, search_term, root_folder, quality_id)
+    return jsonify({'ok': result['status'] == 'queued', **result})
 
 
 @app.route('/api/ingest-folder', methods=['POST'])
