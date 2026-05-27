@@ -1,0 +1,548 @@
+{% extends 'base.html' %}
+{% block title %} — Local Scan{% endblock %}
+
+{% block head %}
+<style>
+.scan-hero {
+  text-align: center;
+  padding: 3rem 1rem 2rem;
+}
+.scan-hero h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+.scan-hero p  { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+.roots { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-bottom: 1.5rem; }
+.root-chip {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.25rem 0.75rem;
+  font-size: 0.8rem; color: var(--text-muted); font-family: monospace;
+}
+
+.progress-wrap {
+  max-width: 480px; margin: 0 auto 1rem;
+  display: none;
+}
+.progress-bar-bg {
+  background: var(--surface2); border-radius: 99px; height: 8px; overflow: hidden;
+}
+.progress-bar-fill {
+  background: var(--accent); height: 100%; border-radius: 99px;
+  transition: width 0.3s; width: 0%;
+}
+.progress-label {
+  font-size: 0.8rem; color: var(--text-muted); margin-top: 0.4rem; text-align: center;
+}
+
+/* Stats bar */
+.stats-bar {
+  display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+.stat-pill {
+  display: flex; align-items: center; gap: 0.5rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem 1rem; font-size: 0.875rem;
+}
+.stat-pill .num { font-weight: 700; font-size: 1.1rem; }
+.stat-pill.importable .num { color: var(--green); }
+.stat-pill.dupe       .num { color: var(--amber); }
+.stat-pill.unknown    .num { color: var(--text-muted); }
+.stat-pill.total      .num { color: var(--accent); }
+
+/* Filter tabs */
+.filter-tabs {
+  display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;
+}
+.filter-tab {
+  padding: 0.35rem 0.9rem; border-radius: 6px; font-size: 0.8rem;
+  font-weight: 500; cursor: pointer; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text-muted); transition: all 0.15s;
+}
+.filter-tab:hover, .filter-tab.active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* Bulk actions */
+.bulk-bar {
+  display: flex; gap: 0.75rem; align-items: center;
+  margin-bottom: 1rem; flex-wrap: wrap;
+}
+.bulk-bar .count { font-size: 0.85rem; color: var(--text-muted); }
+
+/* Results table */
+.scan-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.scan-table th {
+  text-align: left; padding: 0.6rem 0.75rem;
+  color: var(--text-muted); font-weight: 500; font-size: 0.8rem;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.scan-table td {
+  padding: 0.55rem 0.75rem; border-bottom: 1px solid rgba(22,51,82,0.4);
+  vertical-align: middle;
+}
+.scan-table tr:hover td { background: rgba(59,130,246,0.04); }
+.scan-table tr.done td { opacity: 0.35; }
+
+.code-badge {
+  font-family: monospace; font-size: 0.8rem; font-weight: 700;
+  color: var(--accent);
+}
+.path-cell {
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-muted); font-size: 0.78rem;
+  font-family: monospace;
+}
+.status-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 5px;
+}
+.status-importable { color: var(--green); }
+.status-importable .status-dot { background: var(--green); }
+.status-dupe       { color: var(--amber); }
+.status-dupe .status-dot { background: var(--amber); }
+.status-no_code,
+.status-not_monitored { color: var(--text-muted); }
+.status-no_code .status-dot,
+.status-not_monitored .status-dot { background: var(--text-muted); }
+.status-unmonitored { color: var(--amber); }
+.status-unmonitored .status-dot { background: var(--amber); }
+
+.action-cell { display: flex; gap: 0.4rem; white-space: nowrap; }
+.btn-xs {
+  padding: 0.25rem 0.65rem; font-size: 0.78rem; border-radius: 5px;
+  font-weight: 500; cursor: pointer; border: none; display: inline-flex; align-items: center;
+}
+.btn-import  { background: rgba(34,197,94,0.15); color: var(--green); }
+.btn-import:hover  { background: rgba(34,197,94,0.3); }
+.btn-replace { background: rgba(59,130,246,0.15); color: var(--accent); }
+.btn-replace:hover { background: rgba(59,130,246,0.3); }
+.btn-delete  { background: rgba(239,68,68,0.12); color: var(--red,#ef4444); }
+.btn-delete:hover  { background: rgba(239,68,68,0.25); }
+.btn-ignore  { background: rgba(100,116,139,0.12); color: var(--text-muted); }
+.btn-ignore:hover  { background: rgba(100,116,139,0.25); color: var(--text); }
+.btn-xs:disabled { opacity: 0.35; cursor: not-allowed; }
+.size-cmp { font-size: 0.72rem; color: var(--text-muted); display: block; margin-top: 2px; }
+.size-bigger  { color: var(--green); }
+.size-smaller { color: var(--amber); }
+
+.empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="scan-hero">
+  <h1>Local Backup Scanner</h1>
+  <p>Scans performer folders in your backup drives, matches scene codes to Whisparr, and imports missing files.</p>
+  <div class="roots">
+    {% for root in backup_roots %}
+    <span class="root-chip">{{ root }}</span>
+    {% endfor %}
+  </div>
+  <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan Now</button>
+  <div id="dbInfo" style="margin-top:0.75rem;font-size:0.8rem;color:var(--text-muted);"></div>
+</div>
+
+<div class="progress-wrap" id="progressWrap">
+  <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+  <div class="progress-label" id="progressLabel">Starting…</div>
+</div>
+
+<div id="resultsArea" style="display:none;">
+  <div class="stats-bar" id="statsBar"></div>
+
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;">
+    <div class="filter-tabs" id="filterTabs">
+      <button class="filter-tab active" data-filter="importable" onclick="setFilter('importable')">Importable</button>
+      <button class="filter-tab" data-filter="dupe"       onclick="setFilter('dupe')">Dupes</button>
+      <button class="filter-tab" data-filter="unmonitored"   onclick="setFilter('unmonitored')">Unmonitored</button>
+      <button class="filter-tab" data-filter="not_monitored" onclick="setFilter('not_monitored')">Not in library</button>
+      <button class="filter-tab" data-filter="no_code"    onclick="setFilter('no_code')">No code</button>
+      <button class="filter-tab" data-filter="all"        onclick="setFilter('all')">All</button>
+    </div>
+    <div class="bulk-bar" id="bulkBar">
+      <button class="btn btn-xs btn-import" id="importAllBtn" onclick="importAll()" style="padding:0.4rem 0.9rem;font-size:0.82rem;">↑ Import all importable</button>
+      <button class="btn btn-xs btn-delete" id="deleteAllBtn" onclick="deleteAll()" style="padding:0.4rem 0.9rem;font-size:0.82rem;">✕ Delete all dupes</button>
+      <button class="btn btn-xs btn-replace" id="smartBtn" onclick="smartResolveDupes()" style="padding:0.4rem 0.9rem;font-size:0.82rem;" title="Replace if backup is bigger, delete if smaller">⚡ Smart resolve dupes</button>
+      <span class="count" id="bulkCount"></span>
+    </div>
+  </div>
+
+  <div style="overflow-x:auto;">
+    <table class="scan-table">
+      <thead>
+        <tr>
+          <th>Performer</th>
+          <th>Code</th>
+          <th>Title</th>
+          <th>File</th>
+          <th>Size</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="scanBody"></tbody>
+    </table>
+  </div>
+  <div class="empty-state" id="emptyState" style="display:none;">Nothing to show for this filter.</div>
+</div>
+
+<script>
+var _allResults = [];
+var _currentFilter = 'importable';
+
+// On page load: show DB info + auto-display results or startup progress
+(function() {
+  fetch('/api/scan-db-info')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var el = document.getElementById('dbInfo');
+      if (d.count > 0) {
+        el.textContent = d.count.toLocaleString() + ' files indexed · last full walk: ' + d.last_scan;
+      } else {
+        el.textContent = 'No file index yet — click Scan Now to build it.';
+      }
+    }).catch(function() {});
+
+  // Check if results are already ready or being loaded
+  fetch('/api/scan-progress')
+    .then(function(r) { return r.json(); })
+    .then(function(p) {
+      if (p.ready) {
+        loadResults();
+      } else if (p.running) {
+        // Startup loader is in progress — show the progress bar and poll
+        document.getElementById('progressWrap').style.display = 'block';
+        document.getElementById('scanBtn').disabled = true;
+        document.getElementById('scanBtn').textContent = 'Loading…';
+        pollProgress();
+      }
+      // Otherwise: DB is empty or scan never run — user clicks Scan Now
+    }).catch(function() {});
+})();
+
+function startScan() {
+  var btn = document.getElementById('scanBtn');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  document.getElementById('resultsArea').style.display = 'none';
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('progressLabel').textContent = 'Starting…';
+
+  fetch('/api/scan-start', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { alert(d.error || 'Could not start scan'); btn.disabled = false; btn.textContent = 'Scan Now'; return; }
+      pollProgress();
+    });
+}
+
+function pollProgress() {
+  fetch('/api/scan-progress')
+    .then(r => r.json())
+    .then(d => {
+      var pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('progressLabel').textContent =
+        d.status + (d.total > 0 ? ' (' + d.done + '/' + d.total + ')' : '');
+      if (d.ready) {
+        loadResults();
+      } else {
+        setTimeout(pollProgress, 600);
+      }
+    })
+    .catch(() => setTimeout(pollProgress, 1000));
+}
+
+function loadResults() {
+  fetch('/api/scan-results')
+    .then(r => r.json())
+    .then(data => {
+      _allResults = data;
+      document.getElementById('progressWrap').style.display = 'none';
+      document.getElementById('resultsArea').style.display = 'block';
+      var btn = document.getElementById('scanBtn');
+      btn.disabled = false;
+      btn.textContent = 'Re-scan';
+      renderStats();
+      renderTable();
+    });
+}
+
+function renderStats() {
+  var counts = {importable:0, dupe:0, unmonitored:0, no_code:0, not_monitored:0};
+  _allResults.forEach(r => { if (counts[r.status] !== undefined) counts[r.status]++; });
+  document.getElementById('statsBar').innerHTML =
+    '<div class="stat-pill total"><span class="num">' + _allResults.length + '</span> total files</div>' +
+    '<div class="stat-pill importable"><span class="num">' + counts.importable + '</span> importable</div>' +
+    '<div class="stat-pill dupe"><span class="num">' + counts.dupe + '</span> dupes</div>' +
+    '<div class="stat-pill dupe"><span class="num">' + counts.unmonitored + '</span> unmonitored</div>' +
+    '<div class="stat-pill unknown"><span class="num">' + (counts.no_code + counts.not_monitored) + '</span> unmatched</div>';
+}
+
+function setFilter(f) {
+  _currentFilter = f;
+  document.querySelectorAll('.filter-tab').forEach(t => t.classList.toggle('active', t.dataset.filter === f));
+  renderTable();
+}
+
+function renderTable() {
+  var rows = _currentFilter === 'all' ? _allResults : _allResults.filter(r => r.status === _currentFilter);
+  var body = document.getElementById('scanBody');
+  var empty = document.getElementById('emptyState');
+  document.getElementById('bulkCount').textContent = rows.length + ' file' + (rows.length !== 1 ? 's' : '');
+
+  if (!rows.length) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  var html = '';
+  rows.forEach(function(r, i) {
+    var statusLabel = {
+      importable:    '<span class="status-importable"><span class="status-dot"></span>Importable</span>',
+      dupe:          '<span class="status-dupe"><span class="status-dot"></span>Dupe</span>',
+      unmonitored:   '<span class="status-unmonitored"><span class="status-dot"></span>Unmonitored</span>',
+      no_code:       '<span class="status-no_code"><span class="status-dot"></span>No code</span>',
+      not_monitored: '<span class="status-not_monitored"><span class="status-dot"></span>Not in library</span>',
+    }[r.status] || r.status;
+
+
+
+    // Size cell — for dupes show backup vs existing with colour hint
+    var sizeCell = r.size_mb + ' MB';
+    if (r.status === 'dupe' && r.existing_mb != null) {
+      var diff = r.size_mb - r.existing_mb;
+      var cls  = diff > 0 ? 'size-bigger' : diff < 0 ? 'size-smaller' : '';
+      var arrow = diff > 0 ? '↑' : diff < 0 ? '↓' : '=';
+      sizeCell += '<span class="size-cmp ' + cls + '">' + arrow + ' existing ' + r.existing_mb + ' MB</span>';
+    }
+
+    var vid  = JSON.stringify(r.video);
+    var actions = '';
+    var title = JSON.stringify(r.title || '');
+    if (r.status === 'importable') {
+      actions =
+        '<button class="btn-xs btn-import"  onclick="importOne(this,' + vid + ',' + r.wid + ',' + title + ')">Import</button>' +
+        '<button class="btn-xs btn-ignore"  onclick="ignoreOne(this,' + vid + ')">Ignore</button>';
+    } else if (r.status === 'dupe') {
+      actions =
+        '<button class="btn-xs btn-replace" onclick="importOne(this,' + vid + ',' + r.wid + ',' + title + ',true)">Replace</button>' +
+        '<button class="btn-xs btn-delete"  onclick="deleteOne(this,' + vid + ')">Delete</button>' +
+        '<button class="btn-xs btn-ignore"  onclick="ignoreOne(this,' + vid + ')">Ignore</button>';
+    } else if (r.status === 'unmonitored') {
+      actions =
+        '<button class="btn-xs btn-import" onclick="monitorAndImport(this,' + vid + ',' + r.wid + ',' + title + ')">Monitor + Import</button>' +
+        '<button class="btn-xs btn-ignore" onclick="ignoreOne(this,' + vid + ')">Ignore</button>';
+    } else if (r.status === 'not_monitored' && r.code) {
+      var cod = JSON.stringify(r.code);
+      actions =
+        '<button class="btn-xs btn-replace" onclick="addAndImport(this,' + vid + ',' + cod + ',' + title + ')">Add + Import</button>' +
+        '<button class="btn-xs btn-ignore"  onclick="ignoreOne(this,' + vid + ')">Ignore</button>';
+    } else {
+      actions = '<button class="btn-xs btn-ignore" onclick="ignoreOne(this,' + vid + ')">Ignore</button>';
+    }
+
+    html += '<tr id="row-' + i + '">' +
+      '<td>' + esc(r.performer) + '</td>' +
+      '<td><span class="code-badge">' + (r.code || '—') + '</span></td>' +
+      '<td>' + (r.title ? esc(r.title) : '<span style="color:var(--text-muted)">—</span>') + '</td>' +
+      '<td class="path-cell" title="' + esc(r.video) + '">' + esc(r.video) + '</td>' +
+      '<td style="white-space:nowrap">' + sizeCell + '</td>' +
+      '<td>' + statusLabel + '</td>' +
+      '<td class="action-cell">' + actions + '</td>' +
+      '</tr>';
+  });
+  body.innerHTML = html;
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function importOne(btn, video, wid, title, force) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  fetch('/api/import-local', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, wid: wid, title: title || '', force: !!force})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.textContent = '✓';
+      btn.closest('tr').classList.add('done');
+      // Mark as done in allResults
+      var idx = _allResults.findIndex(r => r.video === video);
+      if (idx >= 0) _allResults[idx].status = '_done';
+    } else {
+      btn.textContent = '✗';
+      btn.disabled = false;
+    }
+  });
+}
+
+function deleteOne(btn, video) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  fetch('/api/delete-local', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.textContent = '✓';
+      btn.closest('tr').classList.add('done');
+      var idx = _allResults.findIndex(r => r.video === video);
+      if (idx >= 0) _allResults[idx].status = '_done';
+    } else {
+      btn.textContent = '✗';
+      btn.disabled = false;
+    }
+  });
+}
+
+function smartResolveDupes() {
+  var btn = document.getElementById('smartBtn');
+  btn.disabled = true;
+  var targets = _allResults.filter(r => r.status === 'dupe');
+  var replaced = 0, deleted = 0;
+  function next() {
+    if (!targets.length) {
+      btn.textContent = '⚡ Done (↑' + replaced + ' replaced, ✕' + deleted + ' deleted)';
+      return;
+    }
+    var r = targets.shift();
+    var isUpgrade = r.existing_mb != null && r.size_mb > r.existing_mb;
+    var url  = isUpgrade ? '/api/import-local' : '/api/delete-local';
+    var body = isUpgrade ? {video: r.video, wid: r.wid, title: r.title || '', force: true} : {video: r.video};
+    btn.textContent = '⚡ Resolving… (↑' + replaced + ' ✕' + deleted + ')';
+    fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+      .then(res => res.json())
+      .then(d => {
+        if (d.ok) { isUpgrade ? replaced++ : deleted++; r.status = '_done'; }
+        next();
+      }).catch(next);
+  }
+  next();
+}
+
+function addAndImport(btn, video, code, title) {
+  btn.disabled = true;
+  btn.textContent = 'Looking up…';
+  fetch('/api/add-and-import', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, code: code, title: title || ''})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.textContent = '✓ Added';
+      btn.closest('tr').classList.add('done');
+      var idx = _allResults.findIndex(r => r.video === video);
+      if (idx >= 0) _allResults[idx].status = '_done';
+    } else {
+      btn.textContent = '✗ ' + (d.error || 'failed').slice(0, 30);
+      btn.title = d.error || '';
+      btn.disabled = false;
+    }
+  });
+}
+
+function monitorAndImport(btn, video, wid, title) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  fetch('/api/monitor-and-import', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, wid: wid, title: title || ''})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.textContent = '✓';
+      btn.closest('tr').classList.add('done');
+      var idx = _allResults.findIndex(r => r.video === video);
+      if (idx >= 0) _allResults[idx].status = '_done';
+    } else {
+      btn.textContent = '✗';
+      btn.title = d.error || '';
+      btn.disabled = false;
+    }
+  });
+}
+
+function ignoreOne(btn, video) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  fetch('/api/scan-ignore', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.textContent = '✓';
+      btn.closest('tr').classList.add('done');
+      var idx = _allResults.findIndex(r => r.video === video);
+      if (idx >= 0) _allResults[idx].status = '_done';
+    } else {
+      btn.textContent = 'err';
+      btn.disabled = false;
+    }
+  });
+}
+
+function importAll() {
+  var btn = document.getElementById('importAllBtn');
+  btn.disabled = true;
+  var targets = _allResults.filter(r => r.status === 'importable');
+  var done = 0;
+  function next() {
+    if (!targets.length) {
+      btn.textContent = '✓ Done (' + done + ')';
+      return;
+    }
+    var r = targets.shift();
+    fetch('/api/import-local', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video: r.video, wid: r.wid, title: r.title || ''})
+    }).then(res => res.json()).then(d => {
+      if (d.ok) { done++; r.status = '_done'; }
+      btn.textContent = '↑ Importing… (' + done + ')';
+      next();
+    }).catch(next);
+  }
+  next();
+}
+
+function deleteAll() {
+  var btn = document.getElementById('deleteAllBtn');
+  btn.disabled = true;
+  var targets = _allResults.filter(r => r.status === 'dupe');
+  var done = 0;
+  function next() {
+    if (!targets.length) {
+      btn.textContent = '✓ Done (' + done + ')';
+      return;
+    }
+    var r = targets.shift();
+    fetch('/api/delete-local', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video: r.video})
+    }).then(res => res.json()).then(d => {
+      if (d.ok) { done++; r.status = '_done'; }
+      btn.textContent = '✕ Deleting… (' + done + ')';
+      next();
+    }).catch(next);
+  }
+  next();
+}
+
+</script>
+{% endblock %}

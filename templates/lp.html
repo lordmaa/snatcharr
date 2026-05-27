@@ -1,0 +1,414 @@
+{% extends 'base.html' %}
+{% block title %} — LP Lookup{% endblock %}
+
+{% block head %}
+<style>
+.lp-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+@media (max-width: 700px) {
+  .lp-layout { grid-template-columns: 1fr; }
+}
+
+/* Sidebar */
+.lp-sidebar {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1rem;
+  position: sticky; top: 72px;
+}
+.lp-sidebar-title {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); font-weight: 600; margin-bottom: 0.75rem;
+}
+.perf-item {
+  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer;
+  font-size: 0.85rem; margin-bottom: 0.25rem; transition: background 0.1s;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.perf-item:hover   { background: var(--surface2); }
+.perf-item.active  { background: rgba(59,130,246,0.15); color: var(--accent); }
+.perf-item .count  { font-size: 0.72rem; color: var(--text-muted); }
+.perf-item.active .count { color: var(--accent); opacity: 0.7; }
+.perf-empty { font-size: 0.82rem; color: var(--text-muted); padding: 0.5rem 0; }
+
+/* Add performer panel */
+.add-panel {
+  margin-top: 1rem; padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.add-panel input {
+  width: 100%; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.45rem 0.6rem;
+  color: var(--text); font-size: 0.82rem; margin-bottom: 0.5rem;
+}
+.add-panel input:focus { outline: none; border-color: var(--accent); }
+
+/* Main area */
+.lp-main-header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem;
+}
+.lp-main-title { font-size: 1.2rem; font-weight: 700; }
+.lp-meta { font-size: 0.78rem; color: var(--text-muted); }
+
+/* Stats pills */
+.scene-stats {
+  display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;
+}
+.scene-stat {
+  font-size: 0.78rem; padding: 0.2rem 0.6rem;
+  border-radius: 4px; font-weight: 600;
+}
+.stat-imported  { background: rgba(34,197,94,0.1);   color: var(--green); }
+.stat-local     { background: rgba(59,130,246,0.1);  color: var(--accent); }
+.stat-missing   { background: rgba(100,116,139,0.1); color: var(--text-muted); }
+
+/* Scene table */
+.scan-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.scan-table th {
+  text-align: left; padding: 0.5rem 0.6rem;
+  color: var(--text-muted); font-weight: 500; font-size: 0.78rem;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.scan-table td {
+  padding: 0.5rem 0.6rem; border-bottom: 1px solid rgba(22,51,82,0.4);
+  vertical-align: middle;
+}
+.scan-table tr:hover td { background: rgba(59,130,246,0.03); }
+.scan-table tr.done td  { opacity: 0.35; }
+
+.code-badge { font-family: monospace; font-size: 0.8rem; font-weight: 700; color: var(--accent); }
+.path-cell  { max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; color: var(--text-muted); font-size: 0.75rem; font-family: monospace; }
+
+.action-cell { display: flex; gap: 0.35rem; white-space: nowrap; }
+.btn-xs {
+  padding: 0.22rem 0.6rem; font-size: 0.76rem; border-radius: 4px;
+  font-weight: 500; cursor: pointer; border: none;
+}
+.btn-import  { background: rgba(34,197,94,0.15);  color: var(--green); }
+.btn-import:hover  { background: rgba(34,197,94,0.3); }
+.btn-replace { background: rgba(59,130,246,0.15); color: var(--accent); }
+.btn-replace:hover { background: rgba(59,130,246,0.3); }
+.btn-ignore  { background: rgba(100,116,139,0.1); color: var(--text-muted); }
+.btn-ignore:hover  { background: rgba(100,116,139,0.2); }
+.btn-xs:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.status-badge {
+  display: inline-block; padding: 0.12rem 0.45rem; border-radius: 4px;
+  font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.s-imported   { background: rgba(34,197,94,0.1);   color: var(--green); }
+.s-importable { background: rgba(59,130,246,0.1);  color: var(--accent); }
+.s-unmonitored{ background: rgba(245,158,11,0.1);  color: var(--amber); }
+.s-add_import { background: rgba(245,158,11,0.1);  color: var(--amber); }
+.s-missing    { background: rgba(100,116,139,0.1); color: var(--text-muted); }
+
+.empty-hint { text-align: center; padding: 3rem 1rem; color: var(--text-muted); font-size: 0.9rem; }
+
+#scanNeeded {
+  margin-bottom: 1rem; background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius);
+  padding: 0.75rem 1rem; font-size: 0.85rem; color: var(--amber);
+  display: none;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">LP Lookup</h1>
+  <span style="font-size:0.8rem;color:var(--text-muted);">Performer scene collections from LP / Analvids</span>
+</div>
+
+<div class="lp-layout">
+
+  <!-- ── Sidebar ── -->
+  <div class="lp-sidebar">
+    <div class="lp-sidebar-title">Tracked Performers</div>
+    <div id="perfList"><span class="perf-empty">Loading…</span></div>
+
+    <div class="add-panel">
+      <div class="lp-sidebar-title" style="margin-top:0;">Add / Refresh</div>
+      <input id="lpUrlInput" type="url" placeholder="analvids or legalporno URL"
+             onkeydown="if(event.key==='Enter') addPerformer()">
+      <button class="btn btn-primary" style="width:100%;font-size:0.82rem;" onclick="addPerformer()" id="addBtn">
+        Fetch Scenes
+      </button>
+      <div id="addStatus" style="margin-top:0.4rem;font-size:0.78rem;color:var(--text-muted);min-height:1em;"></div>
+    </div>
+  </div>
+
+  <!-- ── Main ── -->
+  <div>
+    <div id="scanNeeded">
+      Local Scan not yet run — file availability won't show until you
+      <a href="/scan">run a scan</a> first.
+    </div>
+
+    <div id="mainArea">
+      <div class="empty-hint">Select a performer from the sidebar, or paste a URL to add one.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+var _performers = [];
+var _activeUrl  = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(function() {
+  loadPerformers();
+})();
+
+function loadPerformers() {
+  fetch('/api/lp-performers')
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      _performers = list;
+      renderSidebar();
+      if (list.length === 1) selectPerformer(list[0].url);
+    })
+    .catch(function() {
+      document.getElementById('perfList').innerHTML =
+        '<span class="perf-empty">Could not load performers</span>';
+    });
+}
+
+function renderSidebar() {
+  var el = document.getElementById('perfList');
+  if (!_performers.length) {
+    el.innerHTML = '<span class="perf-empty">No performers yet.<br>Paste a URL below.</span>';
+    return;
+  }
+  el.innerHTML = _performers.map(function(p) {
+    var active = p.url === _activeUrl ? ' active' : '';
+    return '<div class="perf-item' + active + '" onclick="selectPerformer(' + JSON.stringify(p.url) + ')">'
+      + '<span>' + esc(p.label) + '</span>'
+      + '<span class="count">' + p.scene_count + '</span>'
+      + '</div>';
+  }).join('');
+}
+
+// ── Select performer ──────────────────────────────────────────────────────────
+function selectPerformer(url) {
+  _activeUrl = url;
+  renderSidebar();
+  document.getElementById('mainArea').innerHTML =
+    '<div class="empty-hint" style="padding:2rem;">Loading…</div>';
+  fetch('/api/performer-scenes?url=' + encodeURIComponent(url))
+    .then(function(r) { return r.json(); })
+    .then(function(d) { renderScenes(d.label, d.scenes, url); })
+    .catch(function() {
+      document.getElementById('mainArea').innerHTML =
+        '<div class="empty-hint">Failed to load scenes.</div>';
+    });
+}
+
+// ── Add / refresh performer ───────────────────────────────────────────────────
+function addPerformer() {
+  var url    = (document.getElementById('lpUrlInput').value || '').trim();
+  var btn    = document.getElementById('addBtn');
+  var status = document.getElementById('addStatus');
+  if (!url) { alert('Enter a performer URL'); return; }
+  btn.disabled     = true;
+  btn.textContent  = 'Scraping…';
+  status.textContent = '';
+  status.style.color = 'var(--text-muted)';
+
+  fetch('/api/scan-lp-performer', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url: url})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled    = false;
+    btn.textContent = 'Fetch Scenes';
+    if (!d.ok) {
+      status.style.color = 'var(--red)';
+      status.textContent = d.error || 'Error';
+      return;
+    }
+    status.textContent = '✓ ' + d.lp_count + ' scenes';
+    document.getElementById('scanNeeded').style.display = d.scan_ran ? 'none' : 'block';
+    document.getElementById('lpUrlInput').value = '';
+    // Refresh sidebar and show this performer
+    loadPerformers();
+    _activeUrl = url;
+    renderScenes(d.label, d.scenes, url);
+  })
+  .catch(function(e) {
+    btn.disabled    = false;
+    btn.textContent = 'Fetch Scenes';
+    status.style.color = 'var(--red)';
+    status.textContent = String(e);
+  });
+}
+
+// ── Render scene table ────────────────────────────────────────────────────────
+function renderScenes(label, scenes, url) {
+  var imported   = scenes.filter(function(s) { return s.status === 'imported'; }).length;
+  var local      = scenes.filter(function(s) { return ['importable','unmonitored','add_import'].includes(s.status); }).length;
+  var missing    = scenes.filter(function(s) { return s.status === 'missing'; }).length;
+
+  var html = '<div class="lp-main-header">'
+    + '<div class="lp-main-title">' + esc(label) + '</div>'
+    + '<button class="btn btn-secondary" style="font-size:0.78rem;" onclick="refreshPerformer(' + JSON.stringify(url) + ')">↺ Re-scrape</button>'
+    + '</div>'
+    + '<div class="scene-stats">'
+    + '<span class="scene-stat stat-imported">✓ ' + imported + ' imported</span>'
+    + '<span class="scene-stat stat-local">⬇ ' + local + ' available locally</span>'
+    + '<span class="scene-stat stat-missing">— ' + missing + ' missing</span>'
+    + '</div>'
+    + '<div style="overflow-x:auto;">'
+    + '<table class="scan-table"><thead><tr>'
+    + '<th>Code</th><th>Title</th><th>Local File</th><th>Size</th><th>Status</th><th>Action</th>'
+    + '</tr></thead><tbody>';
+
+  scenes.forEach(function(s, i) {
+    var statusBadge = {
+      imported:    '<span class="status-badge s-imported">Imported</span>',
+      importable:  '<span class="status-badge s-importable">Import ready</span>',
+      unmonitored: '<span class="status-badge s-unmonitored">Unmonitored</span>',
+      add_import:  '<span class="status-badge s-add_import">Not in library</span>',
+      missing:     '<span class="status-badge s-missing">Missing</span>',
+    }[s.status] || s.status;
+
+    var localCell = s.local_path
+      ? '<span class="path-cell" title="' + esc(s.local_path) + '">' + esc(s.local_path) + '</span>'
+      : '<span style="color:var(--text-muted)">—</span>';
+    var sizeCell = s.size_mb ? s.size_mb + ' MB' : '—';
+
+    var vid   = JSON.stringify(s.local_path || '');
+    var wid   = s.wid;
+    var title = JSON.stringify(s.title || '');
+    var cod   = JSON.stringify(s.code || '');
+    var lpt   = JSON.stringify(s.lp_title || s.title || '');
+
+    var actions = '';
+    if (s.status === 'imported') {
+      actions = '<span style="color:var(--green);font-size:0.78rem;">✓</span>';
+    } else if (s.status === 'importable' && s.local_path) {
+      actions = '<button class="btn-xs btn-import" onclick="doImport(this,' + vid + ',' + wid + ',' + title + ')">Import</button>';
+    } else if (s.status === 'unmonitored' && s.local_path) {
+      actions = '<button class="btn-xs btn-import" onclick="doMonitorImport(this,' + vid + ',' + wid + ',' + title + ')">Monitor+Import</button>';
+    } else if (s.status === 'add_import' && s.local_path) {
+      actions = '<button class="btn-xs btn-replace" onclick="doAddImport(this,' + vid + ',' + cod + ',' + lpt + ')">Add+Import</button>';
+    }
+
+    html += '<tr id="lpr-' + i + '">'
+      + '<td><span class="code-badge">' + esc(s.code) + '</span></td>'
+      + '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(s.title||'') + '">' + esc(s.title || s.lp_title || '—') + '</td>'
+      + '<td>' + localCell + '</td>'
+      + '<td style="white-space:nowrap">' + sizeCell + '</td>'
+      + '<td>' + statusBadge + '</td>'
+      + '<td class="action-cell">' + actions + '</td>'
+      + '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+  document.getElementById('mainArea').innerHTML = html;
+}
+
+// ── Re-scrape ─────────────────────────────────────────────────────────────────
+function refreshPerformer(url) {
+  document.getElementById('lpUrlInput').value = url;
+  addPerformer();
+}
+
+// ── Import polling ────────────────────────────────────────────────────────────
+// Map of videoPath → {btn, row, deadline}
+var _pendingImports = {};
+var _pollTimer = null;
+
+function _markQueued(btn, video) {
+  btn.disabled = true;
+  btn.textContent = 'Queued →';
+  btn.style.background = 'rgba(245,158,11,0.15)';
+  btn.style.color = 'var(--amber)';
+  _pendingImports[video] = { btn: btn, row: btn.closest('tr'), deadline: Date.now() + 360000 };
+  if (!_pollTimer) _pollTimer = setInterval(_pollImportLog, 5000);
+}
+
+function _pollImportLog() {
+  if (!Object.keys(_pendingImports).length) {
+    clearInterval(_pollTimer); _pollTimer = null; return;
+  }
+  fetch('/api/local-import-log')
+    .then(function(r) { return r.json(); })
+    .then(function(log) {
+      var now = Date.now();
+      log.forEach(function(entry) {
+        var p = _pendingImports[entry.video];
+        if (!p) return;
+        if (entry.status === 'imported') {
+          p.btn.textContent = '✓ Imported';
+          p.btn.style.background = 'rgba(34,197,94,0.15)';
+          p.btn.style.color = 'var(--green)';
+          p.row.classList.add('done');
+          delete _pendingImports[entry.video];
+        } else if (entry.status === 'failed') {
+          p.btn.textContent = '✗ Failed';
+          p.btn.style.background = 'rgba(239,68,68,0.15)';
+          p.btn.style.color = 'var(--red)';
+          p.btn.disabled = false;
+          delete _pendingImports[entry.video];
+        }
+      });
+      // expire after 6 min with no resolution
+      Object.keys(_pendingImports).forEach(function(vid) {
+        if (_pendingImports[vid].deadline < now) {
+          _pendingImports[vid].btn.textContent = '⧖ Pending';
+          delete _pendingImports[vid];
+        }
+      });
+      if (!Object.keys(_pendingImports).length) {
+        clearInterval(_pollTimer); _pollTimer = null;
+      }
+    })
+    .catch(function() {});
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+function doImport(btn, video, wid, title) {
+  btn.disabled = true; btn.textContent = '…';
+  fetch('/api/import-local', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, wid: wid, title: title||''})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) { _markQueued(btn, video); }
+    else { btn.textContent='✗'; btn.disabled=false; btn.title=d.error||''; btn.style.color='var(--red)'; }
+  }).catch(function() { btn.textContent='✗'; btn.disabled=false; });
+}
+
+function doMonitorImport(btn, video, wid, title) {
+  btn.disabled = true; btn.textContent = '…';
+  fetch('/api/monitor-and-import', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, wid: wid, title: title||''})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) { _markQueued(btn, video); }
+    else { btn.textContent='✗'; btn.disabled=false; btn.title=d.error||''; btn.style.color='var(--red)'; }
+  }).catch(function() { btn.textContent='✗'; btn.disabled=false; });
+}
+
+function doAddImport(btn, video, code, lpTitle) {
+  btn.disabled = true; btn.textContent = 'Adding…';
+  fetch('/api/add-and-import', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({video: video, code: code, lp_title: lpTitle||''})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) { _markQueued(btn, video); }
+    else { btn.textContent='✗ '+(d.error||'').slice(0,25); btn.disabled=false; btn.title=d.error||''; btn.style.color='var(--red)'; }
+  }).catch(function() { btn.textContent='✗'; btn.disabled=false; });
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+{% endblock %}

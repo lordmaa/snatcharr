@@ -1,0 +1,182 @@
+{% extends 'base.html' %}
+{% block title %} — Ingest{% endblock %}
+
+{% block head %}
+<style>
+.ingest-box {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.25rem 1.5rem;
+  max-width: 700px; margin-bottom: 1.5rem;
+}
+.ingest-row {
+  display: flex; gap: 0.6rem; align-items: stretch;
+}
+.ingest-row input {
+  flex: 1; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0.55rem 0.85rem;
+  color: var(--text); font-size: 0.9rem; font-family: monospace;
+}
+.ingest-row input:focus { outline: none; border-color: var(--accent); }
+
+.progress-bar-wrap {
+  height: 4px; background: var(--surface2); border-radius: 2px;
+  margin-top: 1rem; overflow: hidden; display: none;
+}
+.progress-bar-fill {
+  height: 100%; background: var(--accent); border-radius: 2px;
+  transition: width 0.3s;
+}
+.progress-label {
+  margin-top: 0.4rem; font-size: 0.78rem; color: var(--text-muted);
+  display: none;
+}
+
+.result-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.result-table th {
+  text-align: left; padding: 0.45rem 0.6rem;
+  color: var(--text-muted); font-size: 0.75rem; font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.result-table td {
+  padding: 0.45rem 0.6rem; border-bottom: 1px solid rgba(22,51,82,0.35);
+  vertical-align: middle;
+}
+.result-table tr:hover td { background: rgba(59,130,246,0.03); }
+
+.tag {
+  display: inline-block; padding: 0.1rem 0.45rem; border-radius: 4px;
+  font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.tag-queued     { background: rgba(245,158,11,0.15);  color: var(--amber); }
+.tag-skipped    { background: rgba(100,116,139,0.1);  color: var(--text-muted); }
+.tag-failed     { background: rgba(239,68,68,0.12);   color: var(--red); }
+.tag-import     { background: rgba(34,197,94,0.12);   color: var(--green); }
+.tag-add        { background: rgba(59,130,246,0.12);  color: var(--accent); }
+.tag-nocode     { background: rgba(100,116,139,0.08); color: var(--text-muted); opacity: 0.6; }
+
+.code-mono { font-family: monospace; font-size: 0.82rem; font-weight: 700; color: var(--accent); }
+.fname-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+              font-family: monospace; font-size: 0.75rem; color: var(--text-muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Ingest Folder</h1>
+  <span style="font-size:0.8rem;color:var(--text-muted);">Point at a folder — codes extracted, matched to Whisparr, imported</span>
+</div>
+
+<div class="ingest-box">
+  <div class="ingest-row">
+    <input id="pathInput" type="text" placeholder="/mnt/nas/backups/Diana Zilli"
+           onkeydown="if(event.key==='Enter') startIngest()">
+    <button class="btn btn-primary" onclick="startIngest()" id="goBtn">Process</button>
+  </div>
+  <div class="progress-bar-wrap" id="progressWrap">
+    <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+  </div>
+  <div class="progress-label" id="progressLabel"></div>
+</div>
+
+<div id="resultsArea"></div>
+
+<script>
+var _jobId    = null;
+var _pollTimer = null;
+
+function startIngest() {
+  var path = (document.getElementById('pathInput').value || '').trim();
+  if (!path) return;
+  var btn = document.getElementById('goBtn');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  document.getElementById('resultsArea').innerHTML = '';
+
+  fetch('/api/ingest-folder', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: path})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) {
+      btn.disabled = false; btn.textContent = 'Process';
+      alert(d.error || 'Error'); return;
+    }
+    _jobId = d.job_id;
+    document.getElementById('progressWrap').style.display = 'block';
+    document.getElementById('progressLabel').style.display = 'block';
+    _pollTimer = setInterval(pollJob, 1500);
+  }).catch(function(e) {
+    btn.disabled = false; btn.textContent = 'Process';
+    alert(String(e));
+  });
+}
+
+function pollJob() {
+  if (!_jobId) return;
+  fetch('/api/ingest-job/' + _jobId)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('progressLabel').textContent =
+        d.status === 'done'
+          ? (d.error ? '✗ ' + d.error : '✓ Done — ' + d.done + ' files processed')
+          : 'Processing ' + d.done + ' / ' + d.total + '…';
+      renderResults(d.results);
+      if (d.status === 'done') {
+        clearInterval(_pollTimer); _pollTimer = null;
+        document.getElementById('goBtn').disabled = false;
+        document.getElementById('goBtn').textContent = 'Process';
+      }
+    }).catch(function() {});
+}
+
+function renderResults(results) {
+  if (!results || !results.length) return;
+
+  var counts = {queued:0, skipped:0, failed:0, nocode:0};
+  results.forEach(function(r) {
+    if (r.status === 'queued')  counts.queued++;
+    else if (r.status === 'skipped') counts.skipped++;
+    else if (r.status === 'failed')  counts.failed++;
+    else if (!r.code) counts.nocode++;
+  });
+
+  var summary = '<div style="display:flex;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;">'
+    + (counts.queued  ? '<span class="tag tag-queued">' + counts.queued + ' queued</span>'   : '')
+    + (counts.skipped ? '<span class="tag tag-skipped">' + counts.skipped + ' skipped</span>' : '')
+    + (counts.nocode  ? '<span class="tag tag-nocode">' + counts.nocode + ' no code</span>'  : '')
+    + (counts.failed  ? '<span class="tag tag-failed">' + counts.failed + ' failed</span>'   : '')
+    + '</div>';
+
+  var rows = results.map(function(r) {
+    var actionTag = '';
+    if (r.action === 'import')         actionTag = '<span class="tag tag-import">import</span>';
+    else if (r.action === 'monitor+import') actionTag = '<span class="tag tag-import">monitor+import</span>';
+    else if (r.action === 'add+import')    actionTag = '<span class="tag tag-add">add+import</span>';
+    else if (r.action === 'skip')          actionTag = '<span class="tag tag-skipped">skip</span>';
+
+    var statusTag = '';
+    if (r.status === 'queued')  statusTag = '<span class="tag tag-queued">Queued →</span>';
+    else if (r.status === 'skipped') statusTag = '<span class="tag tag-skipped">—</span>';
+    else if (r.status === 'failed')  statusTag = '<span class="tag tag-failed">✗ Failed</span>';
+
+    return '<tr>'
+      + '<td class="fname-cell" title="' + esc(r.path) + '">' + esc(r.file) + '</td>'
+      + '<td>' + (r.code ? '<span class="code-mono">' + esc(r.code) + '</span>' : '<span style="color:var(--text-muted)">—</span>') + '</td>'
+      + '<td>' + actionTag + '</td>'
+      + '<td>' + statusTag + '</td>'
+      + '<td style="color:var(--text-muted);font-size:0.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(r.note) + '">' + esc(r.note) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  document.getElementById('resultsArea').innerHTML = summary
+    + '<div style="overflow-x:auto;">'
+    + '<table class="result-table"><thead><tr>'
+    + '<th>File</th><th>Code</th><th>Action</th><th>Status</th><th>Note</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+{% endblock %}

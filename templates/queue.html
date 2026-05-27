@@ -47,6 +47,40 @@
 <p style="color:var(--text-muted);padding:2rem 0;">Nothing in the download queue.</p>
 {% endif %}
 
+{% if local_imports %}
+<div style="margin-bottom:2rem;" id="localImportSection">
+  <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+              color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">
+    Local Imports ({{ local_imports|length }})
+  </div>
+  <div id="localImportList">
+    {% for e in local_imports %}
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+                padding:0.6rem 1rem;margin-bottom:0.4rem;display:flex;align-items:center;
+                justify-content:space-between;gap:1rem;">
+      <div style="min-width:0;">
+        <span style="font-size:0.875rem;font-weight:500;">{{ e.title }}</span>
+        <div style="font-size:0.72rem;color:var(--text-muted);font-family:monospace;
+                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px;margin-top:2px;">
+          {{ e.video }}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:0.6rem;flex-shrink:0;">
+        <span style="font-size:0.72rem;color:var(--text-muted);">{{ e.time }}</span>
+        {% if e.status == 'imported' %}
+          <span class="badge badge-have">Imported</span>
+        {% elif e.status == 'failed' %}
+          <span class="badge badge-not_found">Failed</span>
+        {% else %}
+          <span class="badge badge-queued">Pending</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 {% if imported %}
 <div>
   <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
@@ -80,6 +114,46 @@
 
 {% block scripts %}
 <script>
+// Poll local import log while any entry is still pending
+(function pollLocalImports() {
+  var section = document.getElementById('localImportSection');
+  if (!section) return;
+  function hasPending() {
+    return section.querySelectorAll('.badge-queued').length > 0;
+  }
+  function refresh() {
+    fetch('/api/local-import-log')
+      .then(r => r.json())
+      .then(entries => {
+        var list = document.getElementById('localImportList');
+        list.innerHTML = entries.map(function(e) {
+          var badge = e.status === 'imported'
+            ? '<span class="badge badge-have">Imported</span>'
+            : e.status === 'failed'
+              ? '<span class="badge badge-not_found">Failed</span>'
+              : '<span class="badge badge-queued">Pending</span>';
+          return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);' +
+            'padding:0.6rem 1rem;margin-bottom:0.4rem;display:flex;align-items:center;' +
+            'justify-content:space-between;gap:1rem;">' +
+            '<div style="min-width:0;">' +
+              '<span style="font-size:0.875rem;font-weight:500;">' + (e.title||'') + '</span>' +
+              '<div style="font-size:0.72rem;color:var(--text-muted);font-family:monospace;' +
+                'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px;margin-top:2px;">' +
+                e.video + '</div></div>' +
+            '<div style="display:flex;align-items:center;gap:0.6rem;flex-shrink:0;">' +
+              '<span style="font-size:0.72rem;color:var(--text-muted);">' + e.time + '</span>' +
+              badge + '</div></div>';
+        }).join('');
+        // Update heading count
+        var heading = section.querySelector('div[style*="uppercase"]');
+        if (heading) heading.textContent = 'Local Imports (' + entries.length + ')';
+        if (entries.some(e => e.status === 'pending')) setTimeout(refresh, 5000);
+      })
+      .catch(() => {});
+  }
+  if (hasPending()) setTimeout(refresh, 5000);
+})();
+
 function importAll() {
   fetch('/import', {method: 'POST'})
     .then(r => r.json())

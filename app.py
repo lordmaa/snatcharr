@@ -44,6 +44,8 @@ _DEFAULTS = {
     'ytdlp_enabled':      True,
     'ytdlp_min_res':      720,
     'ytdlp_dl_dir':       '',
+    'backup_roots':       ['/mnt/nas/backups', '/mnt/nas/backups-2', '/mnt/nas/backups-3'],
+    'ignored_paths':      [],
 }
 BUILD_SHA   = os.environ.get('BUILD_SHA', 'dev')
 WHISPARR_DB = os.environ.get('WHISPARR_DB', '/portainer/files/appdata/config/whisparrv3/whisparr3.db')
@@ -69,6 +71,7 @@ def _reload_config(cfg=None):
     global QBITTORRENT_URL, QBITTORRENT_USER, QBITTORRENT_PASS
     global AUTO_SNATCH, SNATCH_INTERVAL_H, RETRY_NOT_FOUND_D
     global YTDLP_ENABLED, YTDLP_MIN_RES, YTDLP_DL_DIR
+    global BACKUP_ROOTS, IGNORED_PATHS
     if cfg is None:
         cfg = load_config()
     WHISPARR_URL      = cfg.get('whisparr_url',       _DEFAULTS['whisparr_url'])
@@ -87,6 +90,9 @@ def _reload_config(cfg=None):
     YTDLP_ENABLED     = cfg.get('ytdlp_enabled',      _DEFAULTS['ytdlp_enabled'])
     YTDLP_MIN_RES     = int(cfg.get('ytdlp_min_res',  _DEFAULTS['ytdlp_min_res']))
     YTDLP_DL_DIR      = cfg.get('ytdlp_dl_dir',       _DEFAULTS['ytdlp_dl_dir'])
+    raw_roots         = cfg.get('backup_roots',        _DEFAULTS['backup_roots'])
+    BACKUP_ROOTS      = [p for p in raw_roots if Path(p).exists()]
+    IGNORED_PATHS     = set(cfg.get('ignored_paths',   _DEFAULTS['ignored_paths']))
 
 AUTO_SNATCH = True
 SNATCH_INTERVAL_H = 4
@@ -110,7 +116,244 @@ def get_prowlarr_indexers():
     except Exception:
         return []
 CODE_RE           = re.compile(r'^(?:[A-Za-z]{1,4}\d{2,6}|\d{4,7})$')
+CODE_SEARCH_RE    = re.compile(r'(?<![A-Za-z0-9])([A-Z]{1,4}\d{2,6})(?![A-Za-z0-9])', re.IGNORECASE)
 VIDEO_EXTS        = {'.mkv', '.mp4', '.avi', '.m4v', '.mov'}
+# Codec/tech tokens that look like scene codes but aren't
+_CODE_EXCLUDE     = {
+    'X264','X265','H264','H265','HEVC','AVC','AAC','MP4','MKV','AVI',
+    'WRB','PRT','XXX','SD','HD','UHD','FHD','TS','WEB','DL','DC',
+    'PART','VOL','EP','DVD','BLU','RAY','FPS','KHZ','MB','GB',
+}
+BACKUP_ROOTS:   list = []  # populated by _reload_config()
+IGNORED_PATHS:  set  = set()  # populated by _reload_config()
+
+# Scan state — shared between the background thread and the SSE stream
+_scan_lock    = threading.Lock()
+_scan_results = None   # None = never run; list = last results
+_scan_running = False
+_scan_progress = {'done': 0, 'total': 0, 'status': ''}
+
+# Local import log — in-memory, newest first, capped at 200 entries
+_local_import_log = collections.deque(maxlen=200)
+
+# Ingest jobs — keyed by job_id string
+_ingest_jobs: dict = {}
+
+# ── Persistent scan database ──────────────────────────────────────────────────
+SCAN_DB = _DATA_DIR / 'scan.db'
+
+def _scan_db_connect():
+    conn = sqlite3.connect(str(SCAN_DB), timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _scan_db_init():
+    conn = _scan_db_connect()
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS backup_files (
+            path      TEXT PRIMARY KEY,
+            performer TEXT,
+            root      TEXT,
+            code      TEXT,
+            size_mb   INTEGER,
+            last_seen REAL
+        );
+        CREATE TABLE IF NOT EXISTS scan_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+        -- Global scene registry (populated from Whisparr + LP scrapes)
+        CREATE TABLE IF NOT EXISTS scenes (
+            code       TEXT PRIMARY KEY,
+            title      TEXT,
+            lp_title   TEXT,
+            wid        INTEGER,
+            has_file   INTEGER DEFAULT 0,
+            monitored  INTEGER DEFAULT 0,
+            updated_at REAL
+        );
+        -- Per-scrape performer→code links (keyed by source URL)
+        CREATE TABLE IF NOT EXISTS performer_scrapes (
+            url         TEXT PRIMARY KEY,
+            label       TEXT,
+            scraped_at  REAL,
+            scene_count INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS performer_scenes (
+            url  TEXT,
+            code TEXT,
+            PRIMARY KEY (url, code)
+        );
+    ''')
+    conn.commit()
+    conn.close()
+
+def _scan_db_upsert(records):
+    """Upsert list of (path, performer, root, code, size_mb) into backup_files."""
+    conn = _scan_db_connect()
+    now  = time.time()
+    conn.executemany('''
+        INSERT INTO backup_files (path, performer, root, code, size_mb, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            performer = excluded.performer,
+            root      = excluded.root,
+            code      = excluded.code,
+            size_mb   = excluded.size_mb,
+            last_seen = excluded.last_seen
+    ''', [(p, perf, root, code, size, now) for p, perf, root, code, size in records])
+    conn.execute("INSERT OR REPLACE INTO scan_meta (key, value) VALUES ('last_scan', ?)",
+                 (str(now),))
+    conn.commit()
+    conn.close()
+
+def _scan_db_purge_missing():
+    """Delete rows for files that no longer exist on disk. Returns count removed."""
+    conn  = _scan_db_connect()
+    rows  = conn.execute('SELECT path FROM backup_files').fetchall()
+    gone  = [r['path'] for r in rows if not Path(r['path']).exists()]
+    if gone:
+        conn.executemany('DELETE FROM backup_files WHERE path = ?', [(p,) for p in gone])
+        conn.commit()
+        log.info('scan db: purged %d missing files', len(gone))
+    conn.close()
+    return len(gone)
+
+def _compute_scan_results():
+    """Load file index from DB + current Whisparr state → results list."""
+    try:
+        whisparr = _load_whisparr_index()
+    except Exception as e:
+        log.warning('compute_scan_results: whisparr index failed — %s', e)
+        whisparr = {}
+    conn  = _scan_db_connect()
+    rows  = conn.execute(
+        'SELECT path, performer, root, code, size_mb FROM backup_files'
+    ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        path = r['path']
+        if path in IGNORED_PATHS:
+            continue
+        code = r['code']
+        entry = {
+            'performer':   r['performer'] or '?',
+            'root':        r['root'] or '',
+            'video':       path,
+            'rel':         path,
+            'code':        code,
+            'size_mb':     r['size_mb'] or 0,
+            'existing_mb': None,
+            'title':       None,
+            'wid':         None,
+            'status':      'no_code',
+        }
+        try:
+            if r['root']:
+                entry['rel'] = str(Path(path).relative_to(r['root']))
+        except ValueError:
+            pass
+        if code and code in whisparr:
+            wid, title, has_file, existing_mb, monitored = whisparr[code]
+            entry['wid']         = wid
+            entry['title']       = title
+            entry['existing_mb'] = existing_mb if has_file else None
+            if not monitored:
+                entry['status'] = 'unmonitored'
+            elif has_file:
+                entry['status'] = 'dupe'
+            else:
+                entry['status'] = 'importable'
+        elif code:
+            entry['status'] = 'not_monitored'
+        results.append(entry)
+    return results
+
+def _sync_scenes_from_whisparr():
+    """Pull all scenes + performer links from Whisparr DB into scan.db scenes table."""
+    try:
+        wconn = db_connect()
+        rows  = wconn.execute('''
+            SELECT m.Id as wid, m.MovieFileId, m.Monitored,
+                   mm.Code, mm.Title,
+                   p.Name as performer_name
+            FROM Credits c
+            JOIN MovieMetadata mm ON mm.Id = c.MovieMetadataId
+            JOIN Movies m         ON m.MovieMetadataId = mm.Id
+            JOIN Performers p     ON p.ForeignId = c.PerformerForeignId
+            WHERE mm.Code IS NOT NULL AND mm.Code != ''
+        ''').fetchall()
+        wconn.close()
+    except Exception as e:
+        log.warning('sync_scenes: whisparr query failed — %s', e)
+        return
+
+    now         = time.time()
+    scene_map   = {}
+    for r in rows:
+        code = (r['Code'] or '').strip().upper()
+        if not code or not CODE_RE.match(code) or code in _CODE_EXCLUDE:
+            continue
+        if code not in scene_map:
+            scene_map[code] = (r['Title'], r['wid'], bool(r['MovieFileId']), bool(r['Monitored']))
+
+    sconn = _scan_db_connect()
+    sconn.executemany('''
+        INSERT INTO scenes (code, title, wid, has_file, monitored, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+            title      = excluded.title,
+            wid        = excluded.wid,
+            has_file   = excluded.has_file,
+            monitored  = excluded.monitored,
+            updated_at = excluded.updated_at
+    ''', [(code, title, wid, int(hf), int(mon), now)
+          for code, (title, wid, hf, mon) in scene_map.items()])
+    sconn.commit()
+    sconn.close()
+    log.info('sync_scenes: upserted %d scenes from Whisparr', len(scene_map))
+
+
+def _scene_sync_loop():
+    _sync_scenes_from_whisparr()
+    while True:
+        time.sleep(1800)
+        try:
+            _sync_scenes_from_whisparr()
+        except Exception:
+            log.exception('scene sync loop error')
+
+
+def _startup_load_scan():
+    """Called once at startup: populate _scan_results from persistent DB (no disk walk)."""
+    global _scan_results, _scan_running, _scan_progress
+    try:
+        conn  = _scan_db_connect()
+        count = conn.execute('SELECT COUNT(*) FROM backup_files').fetchone()[0]
+        conn.close()
+        if count == 0:
+            log.info('scan db: empty — waiting for first manual scan')
+            return
+        with _scan_lock:
+            if _scan_running:
+                return
+            _scan_running  = True
+            _scan_progress = {'done': 0, 'total': count, 'status': 'Loading file index from disk…'}
+        log.info('scan db: loading %d indexed files on startup…', count)
+        results = _compute_scan_results()
+        with _scan_lock:
+            _scan_results  = results
+            _scan_running  = False
+            _scan_progress = {'done': count, 'total': count, 'status': 'Done'}
+        log.info('scan db: startup load complete — %d results', len(results))
+    except Exception as e:
+        log.warning('scan db startup load failed: %s', e)
+        with _scan_lock:
+            _scan_running = False
+
+# Initialise DB schema at import time
+_scan_db_init()
 
 def _atomic_write(path: Path, data: str):
     tmp = path.with_suffix('.tmp')
@@ -233,6 +476,8 @@ def get_performers(active_studios):
                     break
         except Exception:
             pass
+        if not valid:
+            continue
         performers.append({'name': p['Name'], 'pid': p['Id'], 'total': len(valid),
                            'have': have, 'missing': missing, 'queued': queued,
                            'headshot': headshot})
@@ -592,6 +837,82 @@ def search_tube(code):
 
     return urls[:8]
 
+def _extract_lp_scenes(html):
+    """Extract {CODE: title_string} from an LP-family page HTML blob (LP and Analvids)."""
+    scenes = {}
+
+    # ── LegalPorno: code at START of URL slug (/scene/CODE-rest-of-title)
+    for m in re.finditer(
+        r'href="[^"]*?/scene/([A-Za-z]{1,4}\d{2,6})-([^"?]{5,200})"', html, re.IGNORECASE
+    ):
+        code  = m.group(1).upper()
+        title = f'{code} {m.group(2).replace("-", " ").strip()}'
+        if CODE_RE.match(code) and code not in _CODE_EXCLUDE:
+            scenes.setdefault(code, title)
+
+    # ── LegalPorno: code at START of title/h2/strong text
+    for pat in (
+        r'<h2[^>]*>\s*([A-Za-z]{1,4}\d{2,6}\s[^<]{4,200}?)\s*</h2>',
+        r'<strong[^>]*>([A-Za-z]{1,4}\d{2,6}\s[^<]{4,200}?)</strong>',
+        r'\btitle="([A-Za-z]{1,4}\d{2,6}\s[^"]{4,200}?)"',
+    ):
+        for m in re.finditer(pat, html, re.IGNORECASE):
+            text = m.group(1).strip()
+            cm   = re.match(r'^([A-Za-z]{1,4}\d{2,6})\b', text)
+            if cm:
+                code = cm.group(1).upper()
+                if CODE_RE.match(code) and code not in _CODE_EXCLUDE:
+                    scenes.setdefault(code, text)
+
+    # ── Analvids: code at END of title attr ("Full Scene Title CODE")
+    for m in re.finditer(r'title="([^"]{5,400}\s([A-Za-z]{1,4}\d{2,6}))"', html):
+        title = m.group(1).strip()
+        code  = m.group(2).upper()
+        if CODE_RE.match(code) and code not in _CODE_EXCLUDE:
+            scenes.setdefault(code, title)
+
+    # ── Analvids: code at END of /watch/ID/slug_CODE URL
+    for m in re.finditer(r'/watch/\d+/[^\s"]*[_-]([A-Za-z]{1,4}\d{2,6})"', html):
+        code = m.group(1).upper()
+        if CODE_RE.match(code) and code not in _CODE_EXCLUDE:
+            scenes.setdefault(code, code)  # title already captured above if present
+
+    return scenes
+
+
+def _scrape_lp_performer(base_url):
+    """Scrape an LP-family performer page (LP or Analvids) and return {CODE: title} dict."""
+    scenes  = {}
+    headers = {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                           '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer':         base_url,
+    }
+    # Analvids uses ?page=N; LP also uses ?page=N
+    for page in range(1, 51):
+        purl = f'{base_url}?page={page}' if page > 1 else base_url
+        try:
+            r = requests.get(purl, headers=headers, timeout=20)
+            if not r.ok:
+                log.warning('LP scraper page %d: HTTP %s', page, r.status_code)
+                break
+        except Exception as e:
+            log.warning('LP scraper page %d: %s', page, e)
+            break
+        new    = _extract_lp_scenes(r.text)
+        before = len(scenes)
+        for k, v in new.items():
+            scenes.setdefault(k, v)
+        if not new or len(scenes) == before:
+            break
+        if page > 1:
+            time.sleep(1.5)
+    log.info('LP scraper: %d scenes from %s', len(scenes), base_url)
+    return scenes
+
+
 def _ytdlp_worker(code, urls, dl_dir):
     """Try each URL with yt-dlp; download >=480p to dl_dir. Runs in background thread."""
     import yt_dlp
@@ -638,19 +959,13 @@ def find_video_file(storage):
                     key=lambda f: f.stat().st_size, reverse=True)
     return str(videos[0]) if videos else None
 
-def whisparr_manual_import(file_path, movie_id):
-    # Guard: if Whisparr already has a file for this movie, skip import and clean up
-    if whisparr_has_file(movie_id):
-        log.info('import skipped for movie %s — already has file; cleaning up %s', movie_id, file_path)
-        src_dir = Path(file_path).parent
-        try:
-            import shutil
-            shutil.rmtree(src_dir)
-            log.info('cleaned up dupe source dir %s', src_dir)
-        except Exception as e:
-            log.warning('cleanup of dupe %s failed: %s', src_dir, e)
+def whisparr_manual_import(file_path, movie_id, _log_entry=None, force=False):
+    # Guard: if Whisparr already has a file skip import unless force=True (replace/upgrade path)
+    if not force and whisparr_has_file(movie_id):
+        log.info('import skipped for movie %s — already has file: %s', movie_id, file_path)
         return True
 
+    fname  = Path(file_path).name
     folder = str(Path(file_path).parent)
     item   = None
     try:
@@ -661,8 +976,9 @@ def whisparr_manual_import(file_path, movie_id):
             if c.get('path') == file_path:
                 item = c
                 break
-    except Exception:
-        pass
+        log.info('manualimport probe: %s → %s', fname, 'matched' if item else 'no match, using fallback')
+    except Exception as e:
+        log.warning('manualimport probe failed for %s: %s', fname, e)
     if item:
         item['movieId'] = movie_id
         item.pop('movie', None)
@@ -677,17 +993,20 @@ def whisparr_manual_import(file_path, movie_id):
             headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
             json={'name': 'ManualImport', 'files': [item], 'importMode': 'move'},
             timeout=30)
+        log.info('manualimport command: %s → HTTP %s', fname, r.status_code)
         if r.status_code == 201:
+            cmd_id = r.json().get('id', '?')
+            log.info('manualimport queued: %s (cmd %s, movie %s)', fname, cmd_id, movie_id)
             src_dir = Path(file_path).parent
-            def _rescan():
+            def _rescan(log_entry):
                 time.sleep(180)
                 try:
                     requests.post(f'{WHISPARR_URL}/api/v3/command',
                         headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
                         json={'name': 'RescanMovie', 'movieId': movie_id}, timeout=10)
                     log.info('rescan fired for movie %s', movie_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning('rescan failed for movie %s: %s', movie_id, e)
                 try:
                     if src_dir.exists() and not any(
                         f.suffix.lower() in VIDEO_EXTS for f in src_dir.rglob('*') if f.is_file()
@@ -697,8 +1016,14 @@ def whisparr_manual_import(file_path, movie_id):
                         log.info('cleaned up source dir %s', src_dir)
                 except Exception as e:
                     log.warning('cleanup of %s failed: %s', src_dir, e)
-            threading.Thread(target=_rescan, daemon=True).start()
+                if log_entry is not None:
+                    confirmed = whisparr_has_file(movie_id)
+                    log_entry['status'] = 'imported' if confirmed else 'failed'
+                    log.info('import confirmed for movie %s: %s', movie_id, 'yes' if confirmed else 'NO')
+            threading.Thread(target=_rescan, daemon=True,
+                             args=(_log_entry,)).start()
             return True
+        log.warning('manualimport rejected by Whisparr: %s HTTP %s — %s', fname, r.status_code, r.text[:200])
         return False
     except Exception:
         return False
@@ -706,14 +1031,22 @@ def whisparr_manual_import(file_path, movie_id):
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
-    active     = get_active_studios()
-    performers = get_performers(active) if active else []
+    active = get_active_studios()
+    try:
+        performers = get_performers(active) if active else []
+    except Exception as e:
+        log.warning('index: DB error — %s', e)
+        performers = []
     return render_template('index.html', performers=performers, active_studios=active)
 
 @app.route('/performer/<name>')
 def performer(name):
-    active  = get_active_studios()
-    scenes  = get_scenes(name, active)
+    active = get_active_studios()
+    try:
+        scenes = get_scenes(name, active)
+    except Exception as e:
+        log.warning('performer page %s: DB error — %s', name, e)
+        scenes = []
     have    = sum(1 for s in scenes if s['status'] == 'have')
     missing = sum(1 for s in scenes if s['status'] == 'missing')
     queued  = sum(1 for s in scenes if s['status'] == 'queued')
@@ -831,7 +1164,8 @@ def queue_page():
                      'nzo_id': nzo, 'done': done, 'client': info.get('client', 'sabnzbd'),
                      'percentage': slot.get('percentage', '0') if slot else ('100' if done else '0')})
     return render_template('queue.html', rows=rows,
-                           imported=state['imported'], not_found=state['not_found'])
+                           imported=state['imported'], not_found=state['not_found'],
+                           local_imports=list(_local_import_log))
 
 @app.route('/import', methods=['POST'])
 def do_import():
@@ -932,7 +1266,7 @@ def settings():
                     'sabnzbd_url', 'sabnzbd_key',
                     'qbittorrent_url', 'qbittorrent_user', 'qbittorrent_pass',
                     'performer_tag', 'auto_snatch', 'snatch_interval_h', 'retry_not_found_d',
-                    'ytdlp_enabled', 'ytdlp_min_res', 'ytdlp_dl_dir'):
+                    'ytdlp_enabled', 'ytdlp_min_res', 'ytdlp_dl_dir', 'backup_roots'):
             if key in data:
                 cfg[key] = data[key]
         save_config(cfg)
@@ -956,6 +1290,7 @@ def settings():
         ytdlp_enabled=cfg.get('ytdlp_enabled', _DEFAULTS['ytdlp_enabled']),
         ytdlp_min_res=cfg.get('ytdlp_min_res', _DEFAULTS['ytdlp_min_res']),
         ytdlp_dl_dir=cfg.get('ytdlp_dl_dir', _DEFAULTS['ytdlp_dl_dir']),
+        backup_roots=cfg.get('backup_roots', _DEFAULTS['backup_roots']),
     )
 
 @app.route('/logs')
@@ -1231,6 +1566,551 @@ def _run_auto_snatch_inner():
         save_state(state)
     log.info('auto-snatch run complete')
 
+# ── Local backup scanner ──────────────────────────────────────────────────────
+
+def _load_whisparr_index():
+    """One DB query → {CODE: (wid, title, has_file, existing_mb, monitored)} for all movies."""
+    conn = db_connect()
+    rows = conn.execute('''
+        SELECT m.Id as wid, m.MovieFileId, m.Monitored, mm.Code, mm.Title,
+               mf.Size as file_size
+        FROM Movies m
+        JOIN MovieMetadata mm ON mm.Id = m.MovieMetadataId
+        LEFT JOIN MovieFiles mf ON mf.Id = m.MovieFileId
+        WHERE mm.Code IS NOT NULL
+    ''').fetchall()
+    conn.close()
+    return {r['Code'].upper(): (r['wid'], r['Title'], bool(r['MovieFileId']),
+                                 round((r['file_size'] or 0) / 1_000_000),
+                                 bool(r['Monitored']))
+            for r in rows if r['Code']}
+
+def _extract_code(path: Path):
+    """Search all path components (innermost first) for a recognisable scene code."""
+    for part in reversed(path.parts):
+        for m in CODE_SEARCH_RE.finditer(part):
+            candidate = m.group(1).upper()
+            if CODE_RE.match(candidate) and candidate not in _CODE_EXCLUDE:
+                return candidate
+    return None
+
+def _run_scan():
+    global _scan_results, _scan_running, _scan_progress
+    with _scan_lock:
+        if _scan_running:
+            return
+        _scan_running  = True
+        _scan_progress = {'done': 0, 'total': 0, 'status': 'Collecting files…'}
+        _scan_results  = None
+
+    try:
+        # Walk backup roots and collect all video files
+        all_videos = []
+        for root in BACKUP_ROOTS:
+            rpath = Path(root)
+            for f in rpath.rglob('*'):
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
+                    all_videos.append((rpath, f))
+        _scan_progress['total'] = len(all_videos)
+        _scan_progress['status'] = f'Indexing {len(all_videos)} files…'
+
+        # Build records for DB upsert
+        records = []
+        seen    = set()
+        for i, (root, video) in enumerate(all_videos):
+            _scan_progress['done'] = i + 1
+            key = str(video)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                rel  = video.relative_to(root)
+                perf = rel.parts[0] if rel.parts else '?'
+                code = _extract_code(video)
+                size = round(video.stat().st_size / 1_000_000)
+                records.append((key, perf, str(root), code, size))
+            except Exception:
+                pass
+
+        # Persist to DB and remove stale entries
+        _scan_progress['status'] = 'Saving file index…'
+        _scan_db_upsert(records)
+        purged = _scan_db_purge_missing()
+        if purged:
+            log.info('scan: purged %d files no longer on disk', purged)
+
+        # Compute status from current Whisparr state
+        _scan_progress['status'] = 'Computing status from Whisparr…'
+        results = _compute_scan_results()
+
+        _scan_progress['status'] = 'Done'
+        with _scan_lock:
+            _scan_results = results
+        log.info('scan complete: %d files, %d results', len(records), len(results))
+    except Exception as e:
+        log.exception('scan error')
+        _scan_progress['status'] = f'Error: {e}'
+    finally:
+        with _scan_lock:
+            _scan_running = False
+
+@app.route('/scan')
+def scan_page():
+    return render_template('scan.html', backup_roots=BACKUP_ROOTS)
+
+@app.route('/lp')
+def lp_page():
+    return render_template('lp.html')
+
+@app.route('/api/scan-start', methods=['POST'])
+def api_scan_start():
+    global _scan_results
+    with _scan_lock:
+        if _scan_running:
+            return jsonify({'ok': False, 'error': 'scan already running'})
+        _scan_results = None
+    threading.Thread(target=_run_scan, daemon=True, name='local-scan').start()
+    return jsonify({'ok': True})
+
+@app.route('/api/scan-progress')
+def api_scan_progress():
+    with _scan_lock:
+        done    = _scan_results is not None
+        running = _scan_running
+    return jsonify({
+        **_scan_progress,
+        'running': running,
+        'ready':   done,
+    })
+
+@app.route('/api/scan-results')
+def api_scan_results():
+    with _scan_lock:
+        results = _scan_results
+    if results is None:
+        return jsonify({'error': 'no scan results yet'}), 404
+    status_filter = request.args.get('status')
+    if status_filter:
+        results = [r for r in results if r['status'] == status_filter]
+    return jsonify(results)
+
+@app.route('/api/lp-performers')
+def api_lp_performers():
+    """List all performers with persisted LP scrape data."""
+    conn = _scan_db_connect()
+    rows = conn.execute(
+        'SELECT url, label, scraped_at, scene_count FROM performer_scrapes ORDER BY label'
+    ).fetchall()
+    conn.close()
+    now    = time.time()
+    result = []
+    for r in rows:
+        age_s = int(now - r['scraped_at']) if r['scraped_at'] else None
+        if age_s is None:       age_str = 'unknown'
+        elif age_s < 3600:      age_str = f'{age_s // 60}m ago'
+        elif age_s < 86400:     age_str = f'{age_s // 3600}h ago'
+        else:                   age_str = f'{age_s // 86400}d ago'
+        result.append({'url': r['url'], 'label': r['label'],
+                       'scene_count': r['scene_count'], 'scraped_ago': age_str})
+    return jsonify(result)
+
+
+@app.route('/api/performer-scenes')
+def api_performer_scenes():
+    """Return full scene list for a given performer URL from local DB."""
+    url = request.args.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'url param required'}), 400
+    conn = _scan_db_connect()
+    rows = conn.execute('''
+        SELECT ps.code,
+               COALESCE(s.title, s.lp_title, ps.code) as title,
+               s.wid, s.has_file, s.monitored,
+               bf.path as local_path, bf.size_mb,
+               s.lp_title
+        FROM performer_scenes ps
+        LEFT JOIN scenes s        ON s.code  = ps.code
+        LEFT JOIN backup_files bf ON bf.code = ps.code
+        WHERE ps.url = ?
+        ORDER BY ps.code
+    ''', (url,)).fetchall()
+    meta = conn.execute(
+        'SELECT label, scraped_at FROM performer_scrapes WHERE url = ?', (url,)
+    ).fetchone()
+    conn.close()
+    scenes = []
+    for r in rows:
+        has_file  = bool(r['has_file'])
+        local     = r['local_path']
+        wid       = r['wid']
+        monitored = bool(r['monitored'])
+        if has_file:                         status = 'imported'
+        elif local and wid and monitored:    status = 'importable'
+        elif local and wid and not monitored:status = 'unmonitored'
+        elif local and not wid:              status = 'add_import'
+        else:                                status = 'missing'
+        scenes.append({
+            'code': r['code'], 'title': r['title'], 'lp_title': r['lp_title'],
+            'wid': wid, 'has_file': has_file, 'local_path': local,
+            'size_mb': r['size_mb'], 'status': status,
+        })
+    return jsonify({
+        'label':  meta['label'] if meta else url,
+        'scenes': scenes,
+    })
+
+
+@app.route('/api/scan-db-info')
+def api_scan_db_info():
+    try:
+        conn  = _scan_db_connect()
+        count = conn.execute('SELECT COUNT(*) FROM backup_files').fetchone()[0]
+        meta  = conn.execute("SELECT value FROM scan_meta WHERE key='last_scan'").fetchone()
+        conn.close()
+        last_scan = float(meta['value']) if meta else None
+        age_s     = int(time.time() - last_scan) if last_scan else None
+        if age_s is None:
+            age_str = 'never'
+        elif age_s < 120:
+            age_str = 'just now'
+        elif age_s < 3600:
+            age_str = f'{age_s // 60}m ago'
+        elif age_s < 86400:
+            age_str = f'{age_s // 3600}h ago'
+        else:
+            age_str = f'{age_s // 86400}d ago'
+        return jsonify({'count': count, 'last_scan': age_str, 'last_scan_ts': last_scan})
+    except Exception as e:
+        return jsonify({'count': 0, 'last_scan': 'unknown', 'error': str(e)})
+
+@app.route('/api/import-local', methods=['POST'])
+def api_import_local():
+    d     = request.json or {}
+    video = d.get('video')
+    wid   = d.get('wid')
+    if not video or not wid:
+        return jsonify({'ok': False, 'error': 'missing video or wid'}), 400
+    if not Path(video).is_file():
+        return jsonify({'ok': False, 'error': 'file not found'}), 404
+    force = bool(d.get('force', False))
+    entry = {
+        'title':  d.get('title') or Path(video).stem,
+        'video':  video,
+        'wid':    int(wid),
+        'status': 'pending',
+        'time':   time.strftime('%H:%M'),
+        'action': 'replace' if force else 'import',
+    }
+    _local_import_log.appendleft(entry)
+    ok = whisparr_manual_import(video, int(wid), _log_entry=entry, force=force)
+    if not ok:
+        entry['status'] = 'failed'
+    return jsonify({'ok': ok})
+
+@app.route('/api/delete-local', methods=['POST'])
+def api_delete_local():
+    """Delete a local dupe/unwanted file and clean up its directory if empty."""
+    d     = request.json or {}
+    video = d.get('video')
+    if not video:
+        return jsonify({'ok': False, 'error': 'missing video'}), 400
+    p = Path(video)
+    if not p.is_file():
+        return jsonify({'ok': False, 'error': 'file not found'}), 404
+    try:
+        import shutil
+        # Delete companion sidecar files (nfo, jpg, xml, txt) in the same dir
+        for sidecar in p.parent.iterdir():
+            if sidecar.is_file() and sidecar.suffix.lower() in {'.nfo','.jpg','.jpeg','.png','.xml','.txt'}:
+                sidecar.unlink(missing_ok=True)
+        p.unlink()
+        # Remove dir if now empty
+        try:
+            p.parent.rmdir()
+        except OSError:
+            pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/local-import-log')
+def api_local_import_log():
+    return jsonify(list(_local_import_log))
+
+@app.route('/api/add-and-import', methods=['POST'])
+def api_add_and_import():
+    """Look up a scene code in TPDB via Whisparr, add to library, then import the file."""
+    d        = request.json or {}
+    video    = d.get('video')
+    code     = d.get('code', '').upper()
+    lp_title = (d.get('lp_title') or '').strip()
+    if not video or not code:
+        return jsonify({'ok': False, 'error': 'missing video or code'}), 400
+    if not Path(video).is_file():
+        return jsonify({'ok': False, 'error': 'file not found'}), 404
+    try:
+        # Lookup: try code first, then LP title as fallback if provided
+        results = []
+        search_terms = [code]
+        if lp_title and lp_title.upper() != code:
+            search_terms.append(lp_title)
+        for term in search_terms:
+            r = requests.get(f'{WHISPARR_URL}/api/v3/movie/lookup',
+                             params={'term': term},
+                             headers={'X-Api-Key': WHISPARR_KEY}, timeout=15)
+            results = r.json() if r.ok else []
+            if results:
+                break
+        if not results:
+            return jsonify({'ok': False, 'error': f'No TPDB results for {code}'}), 404
+        movie = results[0]
+        # Get root folder + quality profile from first existing movie
+        conn = db_connect()
+        existing = conn.execute('SELECT Path FROM Movies LIMIT 1').fetchone()
+        conn.close()
+        root_folder = str(Path(existing['Path']).parent) if existing else '/mnt/user/data/media/xxx'
+        qp = requests.get(f'{WHISPARR_URL}/api/v3/qualityprofile',
+                          headers={'X-Api-Key': WHISPARR_KEY}, timeout=10).json()
+        quality_id = qp[0]['id'] if qp else 1
+        # Add to library
+        movie['rootFolderPath']   = root_folder
+        movie['qualityProfileId'] = quality_id
+        movie['monitored']        = True
+        movie['addOptions']       = {'searchForMovie': False}
+        r2 = requests.post(f'{WHISPARR_URL}/api/v3/movie',
+                           headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                           json=movie, timeout=15)
+        if r2.status_code not in (200, 201):
+            return jsonify({'ok': False, 'error': f'Add failed HTTP {r2.status_code}: {r2.text[:200]}'}), 500
+        wid   = r2.json()['id']
+        title = movie.get('title') or code
+        log.info('add-and-import: added %s (wid %s) to Whisparr', code, wid)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    entry = {
+        'title':  title,
+        'video':  video,
+        'wid':    wid,
+        'status': 'pending',
+        'time':   time.strftime('%H:%M'),
+        'action': 'add+import',
+    }
+    _local_import_log.appendleft(entry)
+    ok = whisparr_manual_import(video, wid, _log_entry=entry)
+    if not ok:
+        entry['status'] = 'failed'
+    return jsonify({'ok': ok, 'wid': wid, 'title': title})
+
+@app.route('/api/monitor-and-import', methods=['POST'])
+def api_monitor_and_import():
+    """Enable monitoring on a Whisparr movie then import the backup file."""
+    d     = request.json or {}
+    video = d.get('video')
+    wid   = d.get('wid')
+    if not video or not wid:
+        return jsonify({'ok': False, 'error': 'missing video or wid'}), 400
+    if not Path(video).is_file():
+        return jsonify({'ok': False, 'error': 'file not found'}), 404
+    wid = int(wid)
+    # Fetch current movie record from Whisparr
+    try:
+        r = requests.get(f'{WHISPARR_URL}/api/v3/movie/{wid}',
+                         headers={'X-Api-Key': WHISPARR_KEY}, timeout=10)
+        if not r.ok:
+            return jsonify({'ok': False, 'error': f'Whisparr GET failed: {r.status_code}'}), 500
+        movie = r.json()
+        movie['monitored'] = True
+        r2 = requests.put(f'{WHISPARR_URL}/api/v3/movie/{wid}',
+                          headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                          json=movie, timeout=10)
+        if not r2.ok:
+            return jsonify({'ok': False, 'error': f'Whisparr PUT failed: {r2.status_code}'}), 500
+        log.info('monitor-and-import: enabled monitoring for wid %s', wid)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    entry = {
+        'title':  d.get('title') or Path(video).stem,
+        'video':  video,
+        'wid':    wid,
+        'status': 'pending',
+        'time':   time.strftime('%H:%M'),
+        'action': 'monitor+import',
+    }
+    _local_import_log.appendleft(entry)
+    ok = whisparr_manual_import(video, wid, _log_entry=entry)
+    if not ok:
+        entry['status'] = 'failed'
+    return jsonify({'ok': ok})
+
+@app.route('/api/scan-ignore', methods=['POST'])
+def api_scan_ignore():
+    """Permanently ignore a file: remove from DB + in-memory results + config."""
+    global _scan_results
+    d = request.json or {}
+    video = d.get('video')
+    if not video:
+        return jsonify({'ok': False, 'error': 'missing video'}), 400
+    # Remove from persistent file index
+    try:
+        conn = _scan_db_connect()
+        conn.execute('DELETE FROM backup_files WHERE path = ?', (video,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning('scan-ignore: db delete failed for %s: %s', video, e)
+    # Remove from in-memory results immediately
+    with _scan_lock:
+        if _scan_results is not None:
+            _scan_results = [r for r in _scan_results if r.get('video') != video]
+    # Persist to config ignored list as a belt-and-suspenders safeguard
+    cfg = load_config()
+    ignored = cfg.get('ignored_paths', [])
+    if video not in ignored:
+        ignored.append(video)
+        cfg['ignored_paths'] = ignored
+        save_config(cfg)
+        _reload_config(cfg)
+    return jsonify({'ok': True})
+
+@app.route('/api/scan-lp-performer', methods=['POST'])
+def api_scan_lp_performer():
+    """Scrape an LP performer page and cross-reference with current scan's not-in-library results."""
+    d   = request.json or {}
+    url = (d.get('url') or '').strip().rstrip('/')
+    if not url or not url.startswith('http'):
+        return jsonify({'ok': False, 'error': 'Enter a full URL starting with http'}), 400
+    try:
+        lp_scenes = _scrape_lp_performer(url)
+    except Exception as e:
+        log.warning('LP scraper error: %s', e)
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    if not lp_scenes:
+        return jsonify({'ok': False, 'error': 'No scenes found — check URL or try again'}), 404
+    # Derive a human-readable label from the URL
+    label_m = re.search(r'/(?:actress|model)/[^/]+/([^/?#]+)', url)
+    label   = label_m.group(1).replace('_', ' ').replace('-', ' ').title() if label_m else url.split('/')[-1]
+
+    # Persist scenes + performer links into scan.db
+    now   = time.time()
+    sconn = _scan_db_connect()
+    for code, lp_title in lp_scenes.items():
+        sconn.execute('''
+            INSERT INTO scenes (code, lp_title, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+                lp_title   = excluded.lp_title,
+                updated_at = excluded.updated_at
+        ''', (code, lp_title, now))
+        sconn.execute('INSERT OR IGNORE INTO performer_scenes (url, code) VALUES (?, ?)',
+                      (url, code))
+    sconn.execute('''
+        INSERT INTO performer_scrapes (url, label, scraped_at, scene_count)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+            label       = excluded.label,
+            scraped_at  = excluded.scraped_at,
+            scene_count = excluded.scene_count
+    ''', (url, label, now, len(lp_scenes)))
+    sconn.commit()
+    sconn.close()
+
+    with _scan_lock:
+        scan_ran = _scan_results is not None
+
+    # Cross-reference with local backup files
+    sconn2 = _scan_db_connect()
+    rows   = sconn2.execute('''
+        SELECT ps.code,
+               COALESCE(s.title, s.lp_title, ps.code) as title,
+               s.wid, s.has_file, s.monitored,
+               bf.path as local_path, bf.size_mb,
+               s.lp_title
+        FROM performer_scenes ps
+        LEFT JOIN scenes s       ON s.code  = ps.code
+        LEFT JOIN backup_files bf ON bf.code = ps.code
+        WHERE ps.url = ?
+        ORDER BY ps.code
+    ''', (url,)).fetchall()
+    sconn2.close()
+
+    scenes_out = []
+    for r in rows:
+        has_file  = bool(r['has_file'])
+        local     = r['local_path']
+        wid       = r['wid']
+        monitored = bool(r['monitored'])
+        if has_file:
+            status = 'imported'
+        elif local and wid and monitored:
+            status = 'importable'
+        elif local and wid and not monitored:
+            status = 'unmonitored'
+        elif local and not wid:
+            status = 'add_import'
+        else:
+            status = 'missing'
+        scenes_out.append({
+            'code':       r['code'],
+            'title':      r['title'],
+            'lp_title':   r['lp_title'],
+            'wid':        wid,
+            'has_file':   has_file,
+            'local_path': local,
+            'size_mb':    r['size_mb'],
+            'status':     status,
+        })
+
+    return jsonify({
+        'ok':       True,
+        'label':    label,
+        'lp_count': len(lp_scenes),
+        'scan_ran': scan_ran,
+        'scenes':   scenes_out,
+    })
+
+
+_WHISPARR_CONTAINER = os.environ.get('WHISPARR_CONTAINER', 'whisparr-v3')
+_STUCK_MINUTES      = int(os.environ.get('WHISPARR_STUCK_MINUTES', '10'))
+
+def _whisparr_watchdog():
+    """Restart Whisparr if any ManualImport command has been queued/started for too long."""
+    try:
+        r = requests.get(f'{WHISPARR_URL}/api/v3/command',
+                         headers={'X-Api-Key': WHISPARR_KEY}, timeout=10)
+        if not r.ok:
+            return
+        stuck_cutoff = time.time() - _STUCK_MINUTES * 60
+        for cmd in r.json():
+            if cmd.get('name') != 'ManualImport':
+                continue
+            if cmd.get('status') not in ('queued', 'started'):
+                continue
+            # stateChangeTime is ISO8601
+            ts_str = cmd.get('stateChangeTime') or cmd.get('queued') or ''
+            if not ts_str:
+                continue
+            try:
+                from datetime import timezone
+                import datetime as dt
+                ts = dt.datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                ts_epoch = ts.timestamp()
+            except Exception:
+                continue
+            if ts_epoch < stuck_cutoff:
+                log.warning('Whisparr watchdog: ManualImport stuck for >%dm (cmd id=%s) — restarting %s',
+                            _STUCK_MINUTES, cmd.get('id'), _WHISPARR_CONTAINER)
+                try:
+                    import subprocess
+                    subprocess.run(['docker', 'restart', _WHISPARR_CONTAINER],
+                                   timeout=30, capture_output=True)
+                    log.info('Whisparr watchdog: %s restarted', _WHISPARR_CONTAINER)
+                except Exception as e:
+                    log.warning('Whisparr watchdog: restart failed — %s', e)
+                return  # one restart per check is enough
+    except Exception as e:
+        log.warning('Whisparr watchdog error: %s', e)
+
+
 def _auto_import_loop():
     _cleanup_tick = 0
     while True:
@@ -1292,7 +2172,15 @@ def _auto_import_loop():
                 storage = completed[nzo_id]
                 video   = find_video_file(storage)
                 if not video:
-                    log.warning('auto-import %s: no video in %s', code, storage)
+                    misses = info.get('no_video_misses', 0) + 1
+                    info['no_video_misses'] = misses
+                    changed = True
+                    if misses >= 10:
+                        log.warning('auto-import %s: no video after %d attempts, giving up — %s', code, misses, storage)
+                        state['failed'].append(code)
+                        del state['queued'][code]
+                    else:
+                        log.warning('auto-import %s: no video in %s (attempt %d/10)', code, storage, misses)
                     continue
                 ok = whisparr_manual_import(video, info['wid'])
                 if ok:
@@ -1342,9 +2230,10 @@ def _auto_import_loop():
             if changed:
                 save_state(state)
 
-            # Every 30 minutes: sweep downloads dir for dupes and empty folders
-            if _cleanup_tick % 30 == 0:
+            # Every 5 minutes: sweep downloads dir for dupes and empty folders
+            if _cleanup_tick % 5 == 0:
                 _cleanup_downloads_dir()
+                _whisparr_watchdog()
 
         except Exception:
             log.exception('auto-import loop error')
@@ -1356,9 +2245,167 @@ def _start_auto_import():
     if _auto_import_started:
         return
     _auto_import_started = True
-    threading.Thread(target=_auto_import_loop, daemon=True, name='auto-import').start()
-    threading.Thread(target=_auto_snatch_loop, daemon=True, name='auto-snatch').start()
-    log.info('auto-import and auto-snatch background threads started')
+    threading.Thread(target=_auto_import_loop,  daemon=True, name='auto-import').start()
+    threading.Thread(target=_auto_snatch_loop,  daemon=True, name='auto-snatch').start()
+    threading.Thread(target=_startup_load_scan, daemon=True, name='scan-startup').start()
+    threading.Thread(target=_scene_sync_loop,   daemon=True, name='scene-sync').start()
+    log.info('background threads started: auto-import, auto-snatch, scan-startup, scene-sync')
+
+# ── Ingest folder ─────────────────────────────────────────────────────────────
+
+def _do_ingest_folder(job_id, folder_path):
+    job = _ingest_jobs[job_id]
+    try:
+        root = Path(folder_path)
+        if not root.exists():
+            job['error'] = 'Path not found'
+            job['status'] = 'done'
+            return
+
+        videos = sorted([f for f in root.rglob('*')
+                         if f.is_file() and f.suffix.lower() in VIDEO_EXTS])
+        job['total'] = len(videos)
+        if not videos:
+            job['error'] = 'No video files found'
+            job['status'] = 'done'
+            return
+
+        # Cache root folder + quality profile once
+        _root_folder = None
+        _quality_id  = None
+
+        for i, video in enumerate(videos):
+            job['done'] = i + 1
+            res = {'file': video.name, 'path': str(video),
+                   'code': None, 'action': '', 'status': '', 'note': ''}
+
+            code = _extract_code(video)
+            res['code'] = code
+            if not code:
+                res['action'] = 'skip'; res['status'] = 'skipped'; res['note'] = 'no code in filename'
+                job['results'].append(res); continue
+
+            sconn = _scan_db_connect()
+            row   = sconn.execute(
+                'SELECT wid, has_file, monitored, title FROM scenes WHERE code=?', (code,)
+            ).fetchone()
+            sconn.close()
+
+            if row and row['has_file']:
+                res['action'] = 'skip'; res['status'] = 'skipped'
+                res['note'] = row['title'] or code
+                job['results'].append(res); continue
+
+            if row:
+                wid   = row['wid']
+                title = row['title'] or code
+                if not row['monitored']:
+                    res['action'] = 'monitor+import'
+                    try:
+                        r = requests.get(f'{WHISPARR_URL}/api/v3/movie/{wid}',
+                                         headers={'X-Api-Key': WHISPARR_KEY}, timeout=10)
+                        mv = r.json(); mv['monitored'] = True
+                        requests.put(f'{WHISPARR_URL}/api/v3/movie/{wid}',
+                                     headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                                     json=mv, timeout=10)
+                    except Exception as e:
+                        res['status'] = 'failed'; res['note'] = f'monitor: {e}'
+                        job['results'].append(res); continue
+                else:
+                    res['action'] = 'import'
+                entry = {'title': title, 'video': str(video), 'wid': wid,
+                         'status': 'pending', 'time': time.strftime('%H:%M'), 'action': res['action']}
+                _local_import_log.appendleft(entry)
+                ok = whisparr_manual_import(str(video), wid, _log_entry=entry)
+                res['status'] = 'queued' if ok else 'failed'
+                res['note']   = title
+
+            else:
+                # Not in Whisparr — TPDB lookup → add → import
+                res['action'] = 'add+import'
+                try:
+                    r = requests.get(f'{WHISPARR_URL}/api/v3/movie/lookup',
+                                     params={'term': code},
+                                     headers={'X-Api-Key': WHISPARR_KEY}, timeout=15)
+                    hits = r.json() if r.ok else []
+                    if not hits:
+                        res['status'] = 'failed'; res['note'] = 'not in TPDB'
+                        job['results'].append(res); continue
+
+                    if _root_folder is None:
+                        try:
+                            wconn = db_connect()
+                            ex    = wconn.execute('SELECT Path FROM Movies LIMIT 1').fetchone()
+                            wconn.close()
+                            _root_folder = str(Path(ex['Path']).parent) if ex else '/mnt/user/data/media/xxx'
+                            qp = requests.get(f'{WHISPARR_URL}/api/v3/qualityprofile',
+                                              headers={'X-Api-Key': WHISPARR_KEY}, timeout=10).json()
+                            _quality_id = qp[0]['id'] if qp else 1
+                        except Exception:
+                            _root_folder = '/mnt/user/data/media/xxx'; _quality_id = 1
+
+                    movie = hits[0]
+                    movie['rootFolderPath']   = _root_folder
+                    movie['qualityProfileId'] = _quality_id
+                    movie['monitored']        = True
+                    movie['addOptions']       = {'searchForMovie': False}
+                    r2 = requests.post(f'{WHISPARR_URL}/api/v3/movie',
+                                       headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                                       json=movie, timeout=15)
+                    if r2.status_code not in (200, 201):
+                        res['status'] = 'failed'; res['note'] = f'add failed HTTP {r2.status_code}'
+                        job['results'].append(res); continue
+                    wid   = r2.json()['id']
+                    title = movie.get('title') or code
+                    entry = {'title': title, 'video': str(video), 'wid': wid,
+                             'status': 'pending', 'time': time.strftime('%H:%M'), 'action': 'add+import'}
+                    _local_import_log.appendleft(entry)
+                    ok = whisparr_manual_import(str(video), wid, _log_entry=entry)
+                    res['status'] = 'queued' if ok else 'failed'
+                    res['note']   = title
+                except Exception as e:
+                    res['status'] = 'failed'; res['note'] = str(e)
+
+            job['results'].append(res)
+
+        job['status'] = 'done'
+    except Exception as e:
+        job['error'] = str(e)
+        job['status'] = 'done'
+
+
+@app.route('/ingest')
+def ingest_page():
+    return render_template('ingest.html')
+
+
+@app.route('/api/ingest-folder', methods=['POST'])
+def api_ingest_folder():
+    d    = request.json or {}
+    path = (d.get('path') or '').strip()
+    if not path:
+        return jsonify({'ok': False, 'error': 'no path'}), 400
+    if not Path(path).exists():
+        return jsonify({'ok': False, 'error': 'path not found'}), 404
+
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    _ingest_jobs[job_id] = {
+        'status': 'running', 'done': 0, 'total': 0,
+        'results': [], 'error': None, 'path': path,
+    }
+    threading.Thread(target=_do_ingest_folder, args=(job_id, path),
+                     daemon=True, name=f'ingest-{job_id}').start()
+    return jsonify({'ok': True, 'job_id': job_id})
+
+
+@app.route('/api/ingest-job/<job_id>')
+def api_ingest_job(job_id):
+    job = _ingest_jobs.get(job_id)
+    if not job:
+        return jsonify({'ok': False, 'error': 'unknown job'}), 404
+    return jsonify({'ok': True, **job})
+
 
 @app.before_request
 def _ensure_auto_import():

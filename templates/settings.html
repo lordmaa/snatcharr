@@ -161,6 +161,25 @@
     </div>
   </section>
 
+  <section style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;">
+    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-muted);font-weight:600;margin-bottom:0.75rem;">Backup Locations</div>
+    <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:1rem;">
+      Folders scanned by the Local Backup Scanner. Each should contain performer sub-folders.
+      Paths must be mounted inside the container.
+    </p>
+    <div id="backupRootsList" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;">
+      {% for root in backup_roots %}
+      <div class="backup-root-row" style="display:flex;align-items:center;gap:0.5rem;">
+        <input class="settings-input backup-root-input" value="{{ root }}" style="flex:1;">
+        <button type="button" onclick="removeRoot(this)" style="background:rgba(239,68,68,0.12);color:var(--red);border:none;
+          border-radius:5px;padding:0.35rem 0.65rem;font-size:0.85rem;cursor:pointer;flex-shrink:0;">✕</button>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn btn-secondary" style="padding:0.35rem 0.85rem;font-size:0.82rem;" onclick="addRoot()">+ Add path</button>
+  </section>
+
   <button class="btn btn-primary" style="align-self:flex-start;" onclick="save()">Save Settings</button>
 
   <div style="display:flex;align-items:center;gap:1rem;padding-top:0.5rem;border-top:1px solid var(--border);">
@@ -250,7 +269,25 @@ function snatchNow() {
     }).catch(() => { res.className = 'test-result test-err'; res.textContent = '✗ Failed'; });
 }
 
+function addRoot() {
+  var list = document.getElementById('backupRootsList');
+  var row = document.createElement('div');
+  row.className = 'backup-root-row';
+  row.style.cssText = 'display:flex;align-items:center;gap:0.5rem;';
+  row.innerHTML = '<input class="settings-input backup-root-input" placeholder="/mnt/nas/backups" style="flex:1;">' +
+    '<button type="button" onclick="removeRoot(this)" style="background:rgba(239,68,68,0.12);color:var(--red);border:none;' +
+    'border-radius:5px;padding:0.35rem 0.65rem;font-size:0.85rem;cursor:pointer;flex-shrink:0;">✕</button>';
+  list.appendChild(row);
+  row.querySelector('input').focus();
+}
+
+function removeRoot(btn) {
+  btn.closest('.backup-root-row').remove();
+}
+
 function save() {
+  var roots = Array.from(document.querySelectorAll('.backup-root-input'))
+    .map(i => i.value.trim()).filter(Boolean);
   var data = {
     whisparr_url:      document.getElementById('whisparr_url').value.trim(),
     whisparr_key:      document.getElementById('whisparr_key').value.trim(),
@@ -268,6 +305,7 @@ function save() {
     ytdlp_enabled:     document.getElementById('ytdlp_enabled').checked,
     ytdlp_min_res:     parseInt(document.getElementById('ytdlp_min_res').value),
     ytdlp_dl_dir:      document.getElementById('ytdlp_dl_dir').value.trim(),
+    backup_roots:      roots,
   };
   fetch('/settings', {
     method: 'POST',
