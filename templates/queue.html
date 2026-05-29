@@ -107,6 +107,37 @@
 </div>
 {% endif %}
 
+{% if blacklisted %}
+<div style="margin-top:1.5rem;" id="blacklistSection">
+  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.75rem;">
+    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-muted);font-weight:600;">
+      Blacklisted releases ({{ blacklisted.values()|sum(start=[]) |list|length }})
+    </div>
+    <button onclick="clearBlacklist()" style="background:rgba(239,68,68,0.1);color:var(--red);
+      border:1px solid rgba(239,68,68,0.2);border-radius:4px;padding:0.2rem 0.6rem;
+      font-size:0.72rem;cursor:pointer;">Clear all</button>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:0.4rem;">
+    {% for code, releases in blacklisted.items() %}
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;
+                padding:0.5rem 0.75rem;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+        <span style="font-family:monospace;font-size:0.8rem;font-weight:700;color:var(--red);">{{ code }}</span>
+        <button onclick="clearBlacklist('{{ code }}')" style="background:none;color:var(--text-muted);
+          border:none;font-size:0.72rem;cursor:pointer;padding:0;">✕ clear</button>
+      </div>
+      {% for rel in releases %}
+      <div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.2rem;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:600px;"
+           title="{{ rel }}">{{ rel }}</div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <div id="importLog" style="display:none;margin-top:1.5rem;background:var(--surface);
      border:1px solid var(--border);border-radius:var(--radius);padding:1rem;
      font-family:monospace;font-size:0.8rem;"></div>
@@ -153,6 +184,13 @@
   }
   if (hasPending()) setTimeout(refresh, 5000);
 })();
+
+function clearBlacklist(code) {
+  var body = code ? JSON.stringify({code: code}) : '{}';
+  fetch('/api/clear-blacklist', {method:'POST', headers:{'Content-Type':'application/json'}, body: body})
+    .then(function(r){return r.json();})
+    .then(function(d){ if(d.ok) location.reload(); });
+}
 
 function importAll() {
   fetch('/import', {method: 'POST'})

@@ -385,6 +385,7 @@ def load_state():
     s.setdefault('not_found', [])
     s.setdefault('not_found_at', {})
     s.setdefault('failed', [])
+    s.setdefault('blacklisted_releases', {})  # {code: [release_title, ...]}
     return s
 
 def save_state(state):
@@ -700,6 +701,32 @@ def get_sabnzbd_history():
                 if s.get('status') == 'Completed']
     except Exception:
         return []
+
+def get_sabnzbd_failed():
+    """Return dict of {nzo_id: {'name': ..., 'storage': ..., 'fail_message': ...}} for failed items."""
+    try:
+        r = requests.get(f'{SABNZBD_URL}/api', params={
+            'mode': 'history', 'apikey': SABNZBD_KEY, 'output': 'json', 'limit': 500,
+        }, timeout=15)
+        return {s['nzo_id']: {
+                    'name':         s.get('name', ''),
+                    'storage':      s.get('storage', ''),
+                    'fail_message': s.get('fail_message', ''),
+                }
+                for s in r.json().get('history', {}).get('slots', [])
+                if s.get('status') == 'Failed'}
+    except Exception:
+        return {}
+
+def _delete_sabnzbd_history(nzo_id):
+    """Remove a job from SABnzbd history."""
+    try:
+        requests.get(f'{SABNZBD_URL}/api', params={
+            'mode': 'history', 'name': 'delete', 'value': nzo_id,
+            'apikey': SABNZBD_KEY, 'output': 'json',
+        }, timeout=10)
+    except Exception:
+        pass
 
 def whisparr_movie_id_for_code(code):
     """Return (movie_id, path) for an unimported Whisparr movie matching code, or None."""
@@ -1163,8 +1190,10 @@ def queue_page():
         rows.append({'code': code, 'title': info['title'], 'release': info.get('release', ''),
                      'nzo_id': nzo, 'done': done, 'client': info.get('client', 'sabnzbd'),
                      'percentage': slot.get('percentage', '0') if slot else ('100' if done else '0')})
+    blacklisted = state.get('blacklisted_releases', {})
     return render_template('queue.html', rows=rows,
                            imported=state['imported'], not_found=state['not_found'],
+                           blacklisted=blacklisted,
                            local_imports=list(_local_import_log))
 
 @app.route('/import', methods=['POST'])
@@ -1309,6 +1338,19 @@ def api_wipe_queue():
     state['queued'] = {}
     save_state(state)
     return jsonify({'ok': True, 'wiped': wiped})
+
+@app.route('/api/clear-blacklist', methods=['POST'])
+def api_clear_blacklist():
+    """Clear all or a specific code's blacklisted releases."""
+    code  = (request.json or {}).get('code', '').upper().strip()
+    state = load_state()
+    if code:
+        removed = len(state['blacklisted_releases'].pop(code, []))
+    else:
+        removed = sum(len(v) for v in state['blacklisted_releases'].values())
+        state['blacklisted_releases'] = {}
+    save_state(state)
+    return jsonify({'ok': True, 'removed': removed})
 
 @app.route('/manual/<code>')
 def manual_page(code):
@@ -1515,8 +1557,12 @@ def _run_auto_snatch_inner():
                     log.info('auto-snatch: %s not found anywhere', code)
                 continue
 
+            blacklisted = set(state.get('blacklisted_releases', {}).get(code, []))
             nzo_id = dl_client = result = None
             for candidate in nzb_results:
+                if candidate['title'] in blacklisted:
+                    log.info('auto-snatch %s: skipping blacklisted release — %s', code, candidate['title'][:60])
+                    continue
                 nzo_id = add_to_sabnzbd(candidate['url'], code)
                 if nzo_id:
                     dl_client = 'sabnzbd'
@@ -1524,6 +1570,9 @@ def _run_auto_snatch_inner():
                     break
             if not nzo_id:
                 for candidate in torrent_results:
+                    if candidate['title'] in blacklisted:
+                        log.info('auto-snatch %s: skipping blacklisted torrent — %s', code, candidate['title'][:60])
+                        continue
                     nzo_id = add_to_qbittorrent(candidate['url'], code)
                     if nzo_id:
                         dl_client = 'qbittorrent'
@@ -2190,6 +2239,40 @@ def _auto_import_loop():
                     changed = True
                 else:
                     log.warning('auto-import %s: Whisparr import failed', code)
+
+            # Detect SABnzbd failures and blacklist the release so the snatch loop retries
+            sab_failed = get_sabnzbd_failed()
+            for code, info in list(state['queued'].items()):
+                if info.get('client', 'sabnzbd') != 'sabnzbd':
+                    continue
+                nzo_id = info['nzo_id']
+                if nzo_id not in sab_failed:
+                    continue
+                fail_info = sab_failed[nzo_id]
+                release   = info.get('release', nzo_id)
+                log.warning('auto-import %s: SABnzbd failed — %s | %s',
+                            code, release[:80], fail_info['fail_message'][:120])
+                # Blacklist this specific release so we don't queue it again
+                bl = state['blacklisted_releases'].setdefault(code, [])
+                if release not in bl:
+                    bl.append(release)
+                # Clean up the leftover download folder
+                storage = fail_info.get('storage', '')
+                if storage:
+                    src = Path(storage) if Path(storage).is_dir() else Path(storage).parent
+                    try:
+                        import shutil
+                        if src.exists():
+                            shutil.rmtree(src)
+                            log.info('auto-import %s: deleted failed download dir %s', code, src)
+                    except Exception as e:
+                        log.warning('auto-import %s: cleanup of %s failed: %s', code, src, e)
+                # Remove from SABnzbd history
+                _delete_sabnzbd_history(nzo_id)
+                # Remove from queued — snatch loop will retry with a different release
+                del state['queued'][code]
+                changed = True
+                log.info('auto-import %s: removed from queue; snatch loop will retry skipping blacklisted release', code)
 
             # Rescue: catch completed SABnzbd downloads that lost their state entry
             tracked_nzo_ids = {info['nzo_id'] for info in state['queued'].values()}
