@@ -41,9 +41,6 @@ _DEFAULTS = {
     'auto_snatch':        True,
     'snatch_interval_h':  1,
     'retry_not_found_d':  7,
-    'ytdlp_enabled':      True,
-    'ytdlp_min_res':      720,
-    'ytdlp_dl_dir':       '',
     'backup_roots':       ['/mnt/nas/backups', '/mnt/nas/backups-2', '/mnt/nas/backups-3'],
     'ignored_paths':      [],
 }
@@ -87,9 +84,6 @@ def _reload_config(cfg=None):
     AUTO_SNATCH       = cfg.get('auto_snatch',        _DEFAULTS['auto_snatch'])
     SNATCH_INTERVAL_H = cfg.get('snatch_interval_h',  _DEFAULTS['snatch_interval_h'])
     RETRY_NOT_FOUND_D = cfg.get('retry_not_found_d',  _DEFAULTS['retry_not_found_d'])
-    YTDLP_ENABLED     = cfg.get('ytdlp_enabled',      _DEFAULTS['ytdlp_enabled'])
-    YTDLP_MIN_RES     = int(cfg.get('ytdlp_min_res',  _DEFAULTS['ytdlp_min_res']))
-    YTDLP_DL_DIR      = cfg.get('ytdlp_dl_dir',       _DEFAULTS['ytdlp_dl_dir'])
     raw_roots         = cfg.get('backup_roots',        _DEFAULTS['backup_roots'])
     BACKUP_ROOTS      = [p for p in raw_roots if Path(p).exists()]
     IGNORED_PATHS     = set(cfg.get('ignored_paths',   _DEFAULTS['ignored_paths']))
@@ -97,10 +91,6 @@ def _reload_config(cfg=None):
 AUTO_SNATCH = True
 SNATCH_INTERVAL_H = 4
 RETRY_NOT_FOUND_D = 7
-YTDLP_ENABLED = True
-YTDLP_MIN_RES = 720
-YTDLP_DL_DIR  = ''
-
 NEWZNAB_CATS = '6000,6010,6020,6030,6040,6050'
 
 _nzb_lock = threading.Lock()
@@ -824,60 +814,6 @@ def _cleanup_downloads_dir():
             except Exception as e:
                 log.warning('cleanup: failed to remove %s: %s', d.name, e)
 
-_TUBE_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-GB,en;q=0.9',
-}
-
-# Domains confirmed working with yt-dlp — used to validate manual URLs too
-YTDLP_SUPPORTED_DOMAINS = {
-    'tnaflix.com', 'porntrex.com', 'xvideos.com', 'xnxx.com',
-    'xhamster.com', 'eporner.com', 'pornhub.com', 'redtube.com',
-    'tube8.com', 'youporn.com', 'spankbang.com',
-}
-
-def _tube_domain(url):
-    m = re.search(r'https?://(?:www\.)?([^/]+)', url)
-    return m.group(1).lower() if m else ''
-
-def search_tube(code):
-    """Search tnaflix and porntrex for code; return yt-dlp-compatible video page URLs."""
-    urls = []
-    seen = set()
-
-    # tnaflix
-    try:
-        r = requests.get('https://www.tnaflix.com/search.php',
-                         params={'what': code},
-                         headers={**_TUBE_HEADERS, 'Referer': 'https://www.tnaflix.com/'},
-                         timeout=10)
-        raw = re.findall(r'href="(https://www\.tnaflix\.com/[^"]+/video\d+[^"]*)"', r.text)
-        for u in raw:
-            u = u.split('"')[0]
-            if u not in seen and code.upper() in u.upper():
-                seen.add(u)
-                urls.append(u)
-    except Exception as e:
-        log.debug('search_tube tnaflix error: %s', e)
-
-    # porntrex
-    try:
-        r = requests.get('https://www.porntrex.com/search/',
-                         params={'search_query': code},
-                         headers={**_TUBE_HEADERS, 'Referer': 'https://www.porntrex.com/'},
-                         timeout=10)
-        raw = re.findall(r'href="(https://www\.porntrex\.com/video/[^"]+)"', r.text)
-        for u in raw:
-            u = u.split('"')[0]
-            if u not in seen and code.upper() in u.upper():
-                seen.add(u)
-                urls.append(u)
-    except Exception as e:
-        log.debug('search_tube porntrex error: %s', e)
-
-    return urls[:8]
-
 def _extract_lp_scenes(html):
     """Extract {CODE: title_string} from an LP-family page HTML blob (LP and Analvids)."""
     scenes = {}
@@ -953,33 +889,6 @@ def _scrape_lp_performer(base_url):
     log.info('LP scraper: %d scenes from %s', len(scenes), base_url)
     return scenes
 
-
-def _ytdlp_worker(code, urls, dl_dir):
-    """Try each URL with yt-dlp; download >=480p to dl_dir. Runs in background thread."""
-    import yt_dlp
-    dl_dir = Path(dl_dir)
-    try:
-        dl_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        log.warning('ytdlp %s: cannot create %s: %s', code, dl_dir, e)
-        return False
-    ydl_opts = {
-        'format': f'bestvideo[height>={YTDLP_MIN_RES}]+bestaudio/best[height>={YTDLP_MIN_RES}]/best',
-        'outtmpl': str(dl_dir / '%(title)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-    }
-    for url in urls:
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            if find_video_file(str(dl_dir)):
-                log.info('ytdlp %s: downloaded from %s', code, url)
-                return True
-        except Exception as e:
-            log.warning('ytdlp %s: failed %s — %s', code, url, e)
-    log.warning('ytdlp %s: all URLs failed', code)
-    return False
 
 def get_sabnzbd_queue():
     try:
@@ -1335,7 +1244,7 @@ def settings():
                     'sabnzbd_url', 'sabnzbd_key',
                     'qbittorrent_url', 'qbittorrent_user', 'qbittorrent_pass',
                     'performer_tag', 'auto_snatch', 'snatch_interval_h', 'retry_not_found_d',
-                    'ytdlp_enabled', 'ytdlp_min_res', 'ytdlp_dl_dir', 'backup_roots'):
+                    'backup_roots'):
             if key in data:
                 cfg[key] = data[key]
         save_config(cfg)
@@ -1356,9 +1265,6 @@ def settings():
         auto_snatch=cfg.get('auto_snatch', _DEFAULTS['auto_snatch']),
         snatch_interval_h=cfg.get('snatch_interval_h', _DEFAULTS['snatch_interval_h']),
         retry_not_found_d=cfg.get('retry_not_found_d', _DEFAULTS['retry_not_found_d']),
-        ytdlp_enabled=cfg.get('ytdlp_enabled', _DEFAULTS['ytdlp_enabled']),
-        ytdlp_min_res=cfg.get('ytdlp_min_res', _DEFAULTS['ytdlp_min_res']),
-        ytdlp_dl_dir=cfg.get('ytdlp_dl_dir', _DEFAULTS['ytdlp_dl_dir']),
         backup_roots=cfg.get('backup_roots', _DEFAULTS['backup_roots']),
     )
 
@@ -1439,30 +1345,7 @@ def api_manual_import():
     state = load_state()
 
     if url:
-        domain = _tube_domain(url)
-        if not any(domain == d or domain.endswith('.' + d) for d in YTDLP_SUPPORTED_DOMAINS):
-            return jsonify({'ok': False,
-                            'msg': f'{domain} is not supported by yt-dlp — try a different site'})
-        dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
-        dl_dir  = Path(dl_base) / code
-        state['queued'][code] = {
-            'nzo_id':        f'ytdlp_{code}',
-            'wid':           wid,
-            'title':         title,
-            'release':       url[:80],
-            'client':        'ytdlp',
-            'dl_path':       str(dl_dir),
-            'ytdlp_url':     url,
-            'ytdlp_retries': 0,
-            'started_at':    time.time(),
-        }
-        if code in state['not_found']:
-            state['not_found'].remove(code)
-        save_state(state)
-        threading.Thread(target=_ytdlp_worker, args=(code, [url], dl_dir),
-                         daemon=True, name=f'ytdlp-{code}').start()
-        log.info('manual-import %s: yt-dlp queued — %s', code, url[:60])
-        return jsonify({'ok': True, 'msg': f'yt-dlp download started for {code}'})
+        return jsonify({'ok': False, 'msg': 'yt-dlp support has been removed'})
 
     if file_path:
         p = Path(file_path)
@@ -1568,33 +1451,12 @@ def _run_auto_snatch_inner():
             log.info('auto-snatch: searching %s (%s)', code, p['Name'])
             nzb_results, torrent_results = search_prowlarr(code)
             if not nzb_results and not torrent_results:
-                urls = search_tube(code) if YTDLP_ENABLED else []
-                if urls:
-                    dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
-                    dl_dir  = Path(dl_base) / code
-                    state['queued'][code] = {
-                        'nzo_id':       f'ytdlp_{code}',
-                        'wid':          r['wid'],
-                        'title':        r['Title'] or code,
-                        'release':      urls[0][:80],
-                        'client':       'ytdlp',
-                        'dl_path':      str(dl_dir),
-                        'ytdlp_url':    urls[0],
-                        'ytdlp_retries': 0,
-                        'started_at':   time.time(),
-                    }
-                    queued.add(code)
-                    changed = True
-                    threading.Thread(target=_ytdlp_worker, args=(code, urls, dl_dir),
-                                     daemon=True, name=f'ytdlp-{code}').start()
-                    log.info('auto-snatch: %s → ytdlp (%d tube URLs)', code, len(urls))
-                else:
-                    if code not in state['not_found']:
-                        state['not_found'].append(code)
-                    state['not_found_at'][code] = time.strftime('%Y-%m-%dT%H:%M:%S')
-                    nf_codes.add(code)
-                    changed = True
-                    log.info('auto-snatch: %s not found anywhere', code)
+                if code not in state['not_found']:
+                    state['not_found'].append(code)
+                state['not_found_at'][code] = time.strftime('%Y-%m-%dT%H:%M:%S')
+                nf_codes.add(code)
+                changed = True
+                log.info('auto-snatch: %s not found anywhere', code)
                 continue
 
             blacklisted = set(state.get('blacklisted_releases', {}).get(code, []))
@@ -1626,28 +1488,7 @@ def _run_auto_snatch_inner():
                 changed = True
                 log.info('auto-snatch: queued %s via %s — %s', code, dl_client, result['title'][:60])
             else:
-                urls = search_tube(code) if YTDLP_ENABLED else []
-                if urls:
-                    dl_base = YTDLP_DL_DIR or get_sabnzbd_downloads_dir() or str(_DATA_DIR / 'ytdlp')
-                    dl_dir  = Path(dl_base) / code
-                    state['queued'][code] = {
-                        'nzo_id':        f'ytdlp_{code}',
-                        'wid':           r['wid'],
-                        'title':         r['Title'] or code,
-                        'release':       urls[0][:80],
-                        'client':        'ytdlp',
-                        'dl_path':       str(dl_dir),
-                        'ytdlp_url':     urls[0],
-                        'ytdlp_retries': 0,
-                        'started_at':    time.time(),
-                    }
-                    queued.add(code)
-                    changed = True
-                    threading.Thread(target=_ytdlp_worker, args=(code, urls, dl_dir),
-                                     daemon=True, name=f'ytdlp-{code}').start()
-                    log.info('auto-snatch: %s → ytdlp fallback (%d tube URLs)', code, len(urls))
-                else:
-                    log.warning('auto-snatch: all clients rejected %s, no tube results', code)
+                log.warning('auto-snatch: all clients rejected %s', code)
             time.sleep(2)
 
     conn.close()
@@ -2217,41 +2058,9 @@ def _auto_import_loop():
                 client = info.get('client', 'sabnzbd')
 
                 if client == 'ytdlp':
-                    dl_path = info.get('dl_path', '')
-                    video   = find_video_file(dl_path) if dl_path else None
-                    if video:
-                        ok = whisparr_manual_import(video, info['wid'])
-                        if ok:
-                            log.info('auto-import %s: imported via ytdlp — %s', code, Path(video).name)
-                            state['imported'].append(code)
-                            del state['queued'][code]
-                            changed = True
-                        else:
-                            log.warning('auto-import %s: ytdlp Whisparr import failed', code)
-                        continue
-                    # No video yet — check if the thread is still alive
-                    active_names  = {t.name for t in threading.enumerate()}
-                    thread_alive  = f'ytdlp-{code}' in active_names
-                    if thread_alive:
-                        continue  # still downloading, leave it
-                    # Thread is dead and no video — retry indefinitely (30 min cooldown)
-                    ytdlp_url  = info.get('ytdlp_url', '')
-                    started_at = info.get('started_at', 0)
-                    if not ytdlp_url:
-                        # No URL stored (legacy entry) — can't retry, drop it
-                        log.warning('auto-import %s: ytdlp no URL stored, removing', code)
-                        del state['queued'][code]
-                        changed = True
-                        continue
-                    if time.time() - started_at < 1800:
-                        continue  # cooldown — wait 30 min between attempts
-                    retries = info.get('ytdlp_retries', 0) + 1
-                    info['ytdlp_retries'] = retries
-                    info['started_at']    = time.time()
-                    dl_dir = Path(dl_path or str(_DATA_DIR / 'ytdlp' / code))
-                    threading.Thread(target=_ytdlp_worker, args=(code, [ytdlp_url], dl_dir),
-                                     daemon=True, name=f'ytdlp-{code}').start()
-                    log.info('auto-import %s: ytdlp retry #%d (will keep trying)', code, retries)
+                    # yt-dlp support removed — drop stale queue entries
+                    log.info('auto-import %s: dropping stale ytdlp entry', code)
+                    del state['queued'][code]
                     changed = True
                     continue
 
