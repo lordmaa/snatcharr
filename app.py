@@ -753,6 +753,20 @@ def whisparr_has_file(movie_id):
     except Exception:
         return False
 
+def whisparr_existing_file_size(movie_id):
+    """Return size in bytes of Whisparr's existing file for this movie, or 0."""
+    try:
+        conn = db_connect()
+        row = conn.execute('''
+            SELECT mf.Size FROM Movies m
+            JOIN MovieFiles mf ON mf.Id = m.MovieFileId
+            WHERE m.Id = ?
+        ''', (movie_id,)).fetchone()
+        conn.close()
+        return int(row['Size']) if row and row['Size'] else 0
+    except Exception:
+        return 0
+
 def whisparr_code_has_file(code):
     """Return True if any Whisparr movie with this code already has a file."""
     try:
@@ -987,10 +1001,24 @@ def find_video_file(storage):
     return str(videos[0]) if videos else None
 
 def whisparr_manual_import(file_path, movie_id, _log_entry=None, force=False):
-    # Guard: if Whisparr already has a file skip import unless force=True (replace/upgrade path)
+    # Guard: if Whisparr already has a file, upgrade if download is bigger, else clean up source
     if not force and whisparr_has_file(movie_id):
-        log.info('import skipped for movie %s — already has file: %s', movie_id, file_path)
-        return True
+        dl_size = Path(file_path).stat().st_size if Path(file_path).exists() else 0
+        wh_size = whisparr_existing_file_size(movie_id)
+        if dl_size > wh_size * 1.1:
+            log.info('upgrading movie %s: download %.1fGB > existing %.1fGB — forcing import',
+                     movie_id, dl_size/1e9, wh_size/1e9)
+            force = True
+        else:
+            log.info('import skipped for movie %s — already has file: %s', movie_id, file_path)
+            src_dir = Path(file_path).parent
+            try:
+                if src_dir.exists():
+                    import shutil; shutil.rmtree(src_dir)
+                    log.info('cleaned up source dir (already had file): %s', src_dir)
+            except Exception as e:
+                log.warning('cleanup of %s failed: %s', src_dir, e)
+            return True
 
     fname  = Path(file_path).name
     folder = str(Path(file_path).parent)
@@ -1025,15 +1053,28 @@ def whisparr_manual_import(file_path, movie_id, _log_entry=None, force=False):
             cmd_id = r.json().get('id', '?')
             log.info('manualimport queued: %s (cmd %s, movie %s)', fname, cmd_id, movie_id)
             src_dir = Path(file_path).parent
+            file_size_gb = Path(file_path).stat().st_size / 1e9 if Path(file_path).exists() else 0
+            # Poll until confirmed: wait ~1 min per GB, minimum 3 min, maximum 30 min
+            poll_total = max(180, min(int(file_size_gb * 60), 1800))
             def _rescan(log_entry):
-                time.sleep(180)
-                try:
-                    requests.post(f'{WHISPARR_URL}/api/v3/command',
-                        headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
-                        json={'name': 'RescanMovie', 'movieId': movie_id}, timeout=10)
-                    log.info('rescan fired for movie %s', movie_id)
-                except Exception as e:
-                    log.warning('rescan failed for movie %s: %s', movie_id, e)
+                deadline = time.time() + poll_total
+                confirmed = False
+                fired_rescan = False
+                while time.time() < deadline:
+                    time.sleep(30)
+                    if whisparr_has_file(movie_id):
+                        confirmed = True
+                        break
+                    # Fire rescan once after first 3 minutes
+                    if not fired_rescan and (deadline - time.time()) < (poll_total - 180):
+                        try:
+                            requests.post(f'{WHISPARR_URL}/api/v3/command',
+                                headers={'X-Api-Key': WHISPARR_KEY, 'Content-Type': 'application/json'},
+                                json={'name': 'RescanMovie', 'movieId': movie_id}, timeout=10)
+                            log.info('rescan fired for movie %s', movie_id)
+                            fired_rescan = True
+                        except Exception as e:
+                            log.warning('rescan failed for movie %s: %s', movie_id, e)
                 try:
                     if src_dir.exists() and not any(
                         f.suffix.lower() in VIDEO_EXTS for f in src_dir.rglob('*') if f.is_file()
@@ -1044,7 +1085,6 @@ def whisparr_manual_import(file_path, movie_id, _log_entry=None, force=False):
                 except Exception as e:
                     log.warning('cleanup of %s failed: %s', src_dir, e)
                 if log_entry is not None:
-                    confirmed = whisparr_has_file(movie_id)
                     log_entry['status'] = 'imported' if confirmed else 'failed'
                     log.info('import confirmed for movie %s: %s', movie_id, 'yes' if confirmed else 'NO')
             threading.Thread(target=_rescan, daemon=True,
@@ -2119,7 +2159,7 @@ def api_scan_lp_performer():
 
 
 _WHISPARR_CONTAINER = os.environ.get('WHISPARR_CONTAINER', 'whisparr-v3')
-_STUCK_MINUTES      = int(os.environ.get('WHISPARR_STUCK_MINUTES', '10'))
+_STUCK_MINUTES      = int(os.environ.get('WHISPARR_STUCK_MINUTES', '60'))
 
 def _whisparr_watchdog():
     """Restart Whisparr if any ManualImport command has been queued/started for too long."""
@@ -2321,6 +2361,38 @@ def _auto_import_loop():
         except Exception:
             log.exception('auto-import loop error')
 
+def _startup_dl_cleanup():
+    """On startup, delete any empty coded folders left by interrupted import threads."""
+    time.sleep(10)
+    import shutil, re as _re
+    CODE_RE_S = _re.compile(r'\b([A-Z]{2,4}\d{3,5})\b')
+    VIDEO_EXT_S = {'.mp4', '.mkv', '.avi', '.mov'}
+    try:
+        cfg = json.load(open(CONFIG_FILE))
+        dl_root_str = cfg.get('sabnzbd_url', '')
+    except Exception:
+        dl_root_str = ''
+    # Find downloads path from SABnzbd or fall back to /mnt/nas/downloads
+    dl_root = Path('/mnt/nas/downloads')
+    if not dl_root.exists():
+        return
+    cleaned = 0
+    for folder in dl_root.iterdir():
+        if not folder.is_dir(): continue
+        base = _re.sub(r'(\.[0-9]+)+$', '', folder.name)
+        if not CODE_RE_S.search(base): continue
+        has_video = any(f.suffix.lower() in VIDEO_EXT_S for f in folder.rglob('*') if f.is_file())
+        if not has_video:
+            try:
+                shutil.rmtree(folder)
+                cleaned += 1
+                log.info('startup cleanup: removed empty dl folder %s', folder.name)
+            except Exception as e:
+                log.warning('startup cleanup: could not remove %s: %s', folder.name, e)
+    if cleaned:
+        log.info('startup dl-cleanup: removed %d empty coded folders', cleaned)
+
+
 _auto_import_started = False
 
 def _start_auto_import():
@@ -2328,11 +2400,12 @@ def _start_auto_import():
     if _auto_import_started:
         return
     _auto_import_started = True
-    threading.Thread(target=_auto_import_loop,  daemon=True, name='auto-import').start()
-    threading.Thread(target=_auto_snatch_loop,  daemon=True, name='auto-snatch').start()
-    threading.Thread(target=_startup_load_scan, daemon=True, name='scan-startup').start()
-    threading.Thread(target=_scene_sync_loop,   daemon=True, name='scene-sync').start()
-    log.info('background threads started: auto-import, auto-snatch, scan-startup, scene-sync')
+    threading.Thread(target=_auto_import_loop,   daemon=True, name='auto-import').start()
+    threading.Thread(target=_auto_snatch_loop,   daemon=True, name='auto-snatch').start()
+    threading.Thread(target=_startup_load_scan,  daemon=True, name='scan-startup').start()
+    threading.Thread(target=_scene_sync_loop,    daemon=True, name='scene-sync').start()
+    threading.Thread(target=_startup_dl_cleanup, daemon=True, name='dl-cleanup').start()
+    log.info('background threads started: auto-import, auto-snatch, scan-startup, scene-sync, dl-cleanup')
 
 # ── Ingest folder ─────────────────────────────────────────────────────────────
 
@@ -2471,9 +2544,35 @@ def _do_ingest_folder(job_id, folder_path):
             sconn.close()
 
             if row and row['has_file']:
-                res['action'] = 'skip'; res['status'] = 'skipped'
-                res['note'] = row['title'] or code
-                job['results'].append(res); continue
+                # Live check: if download is bigger, upgrade; otherwise clean up source
+                wid_check = row['wid']
+                dl_size = video.stat().st_size
+                wh_size = whisparr_existing_file_size(wid_check) if wid_check else 0
+                if wid_check and dl_size > wh_size * 1.1:
+                    log.info('ingest: upgrading %s — download %.1fGB > existing %.1fGB',
+                             code, dl_size/1e9, wh_size/1e9)
+                    # Fall through to import block with force
+                    entry = {'title': row['title'] or code, 'video': str(video),
+                             'wid': wid_check, 'status': 'pending',
+                             'time': time.strftime('%H:%M'), 'action': 'upgrade'}
+                    _local_import_log.appendleft(entry)
+                    ok = whisparr_manual_import(str(video), wid_check, _log_entry=entry, force=True)
+                    res['action'] = 'upgrade'
+                    res['status'] = 'queued' if ok else 'failed'
+                    res['note']   = row['title'] or code
+                    job['results'].append(res); continue
+                else:
+                    res['action'] = 'skip'; res['status'] = 'skipped'
+                    res['note'] = row['title'] or code
+                    # Clean up source folder since Whisparr already has this file
+                    try:
+                        src_dir = video.parent
+                        if src_dir.exists():
+                            import shutil; shutil.rmtree(src_dir)
+                            log.info('ingest: cleaned up source dir (already had file): %s', src_dir)
+                    except Exception as e:
+                        log.warning('ingest: cleanup of %s failed: %s', video.parent, e)
+                    job['results'].append(res); continue
 
             if row:
                 wid   = row['wid']
