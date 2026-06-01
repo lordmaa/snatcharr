@@ -67,7 +67,6 @@ def _reload_config(cfg=None):
     global SABNZBD_URL, SABNZBD_KEY, PERFORMER_TAG
     global QBITTORRENT_URL, QBITTORRENT_USER, QBITTORRENT_PASS
     global AUTO_SNATCH, SNATCH_INTERVAL_H, RETRY_NOT_FOUND_D
-    global YTDLP_ENABLED, YTDLP_MIN_RES, YTDLP_DL_DIR
     global BACKUP_ROOTS, IGNORED_PATHS
     if cfg is None:
         cfg = load_config()
@@ -77,7 +76,7 @@ def _reload_config(cfg=None):
     PROWLARR_KEY      = cfg.get('prowlarr_key',       _DEFAULTS['prowlarr_key'])
     SABNZBD_URL       = cfg.get('sabnzbd_url',        _DEFAULTS['sabnzbd_url'])
     SABNZBD_KEY       = cfg.get('sabnzbd_key',        _DEFAULTS['sabnzbd_key'])
-    QBITTORRENT_URL   = cfg.get('qbittorrent_url',   _DEFAULTS['qbittorrent_url'])
+    QBITTORRENT_URL   = cfg.get('qbittorrent_url',   _DEFAULTS['qbittorrent_url']).rstrip('/')
     QBITTORRENT_USER  = cfg.get('qbittorrent_user',  _DEFAULTS['qbittorrent_user'])
     QBITTORRENT_PASS  = cfg.get('qbittorrent_pass',  _DEFAULTS['qbittorrent_pass'])
     PERFORMER_TAG     = cfg.get('performer_tag',      _DEFAULTS['performer_tag'])
@@ -87,6 +86,7 @@ def _reload_config(cfg=None):
     raw_roots         = cfg.get('backup_roots',        _DEFAULTS['backup_roots'])
     BACKUP_ROOTS      = [p for p in raw_roots if Path(p).exists()]
     IGNORED_PATHS     = set(cfg.get('ignored_paths',   _DEFAULTS['ignored_paths']))
+    _warn_local_paths(cfg)
 
 AUTO_SNATCH = True
 SNATCH_INTERVAL_H = 4
@@ -116,6 +116,33 @@ _CODE_EXCLUDE     = {
 }
 BACKUP_ROOTS:   list = []  # populated by _reload_config()
 IGNORED_PATHS:  set  = set()  # populated by _reload_config()
+
+_NAS_PREFIXES = ('/mnt/',)
+
+def _check_disk_space():
+    """Warn if root filesystem free space falls below 20 GB."""
+    try:
+        st = os.statvfs('/')
+        free_gb = (st.f_bavail * st.f_frsize) / 1_073_741_824
+        if free_gb < 20:
+            log.warning('DISK SPACE CRITICAL: / has only %.1f GB free — move large files off root filesystem', free_gb)
+        elif free_gb < 40:
+            log.warning('DISK SPACE WARNING: / has %.1f GB free (below 40 GB buffer)', free_gb)
+        else:
+            log.info('disk space: / has %.1f GB free', free_gb)
+    except Exception as e:
+        log.warning('disk space check failed: %s', e)
+
+def _warn_local_paths(cfg):
+    """Warn if any configured output path is on the local root filesystem instead of NAS."""
+    for p in cfg.get('backup_roots', []):
+        if p and not any(p.startswith(pfx) for pfx in _NAS_PREFIXES):
+            log.warning('PATH SAFETY: backup_roots entry %r is on local storage — '
+                        'large files must be on NAS (/mnt/)', p)
+    ytdlp_dir = cfg.get('ytdlp_dl_dir', '')
+    if ytdlp_dir and not any(ytdlp_dir.startswith(pfx) for pfx in _NAS_PREFIXES):
+        log.warning('PATH SAFETY: ytdlp_dl_dir=%r is on local storage — '
+                    'downloads must be on NAS (/mnt/)', ytdlp_dir)
 
 # Scan state — shared between the background thread and the SSE stream
 _scan_lock    = threading.Lock()
@@ -621,7 +648,7 @@ def _qbit_session():
         r = s.post(f'{QBITTORRENT_URL}/api/v2/auth/login',
                    data={'username': QBITTORRENT_USER, 'password': QBITTORRENT_PASS},
                    timeout=10)
-        if r.text.strip() == 'Ok.':
+        if r.text.strip() == 'Ok.' or r.status_code == 204:
             return s
     except Exception:
         pass
@@ -1225,7 +1252,7 @@ def api_test():
             s = requests.Session()
             r = s.post(f'{url}/api/v2/auth/login',
                        data={'username': user, 'password': key}, timeout=8)
-            if r.text.strip() == 'Ok.':
+            if r.text.strip() == 'Ok.' or r.status_code == 204:
                 ver = s.get(f'{url}/api/v2/app/version', timeout=8).text.strip()
                 return jsonify({'ok': True, 'msg': f'v{ver}'})
             return jsonify({'ok': False, 'msg': 'Auth failed'})
@@ -2068,6 +2095,9 @@ def _auto_import_loop():
                 if nzo_id not in completed:
                     continue
                 storage = completed[nzo_id]
+                log.info('auto-import %s: completed download at %s', code, storage)
+                if storage and not any(storage.startswith(pfx) for pfx in _NAS_PREFIXES):
+                    log.warning('auto-import %s: download storage path %r is on local disk, not NAS', code, storage)
                 video   = find_video_file(storage)
                 if not video:
                     misses = info.get('no_video_misses', 0) + 1
@@ -2167,6 +2197,10 @@ def _auto_import_loop():
                 _cleanup_downloads_dir()
                 _whisparr_watchdog()
 
+            # Every hour: check root filesystem free space
+            if _cleanup_tick % 60 == 0:
+                _check_disk_space()
+
         except Exception:
             log.exception('auto-import loop error')
 
@@ -2204,17 +2238,47 @@ def _startup_dl_cleanup():
 
 _auto_import_started = False
 
+def _retry_search_loop():
+    """Periodically retry searching for 'not found' missing files (6x per hour = every 10 min)."""
+    while True:
+        time.sleep(600)  # 10 minutes
+        try:
+            global state
+            with _snatch_running:
+                if not state.get('not_found'):
+                    continue
+                retry_codes = state['not_found'].copy()
+
+            log.info('retry-search: attempting %d previously-not-found codes', len(retry_codes))
+            for code in retry_codes:
+                try:
+                    nzb_results, torrent_results = search_prowlarr(code)
+                    if nzb_results or torrent_results:
+                        log.info('retry-search: %s now found!', code)
+                        with _snatch_running:
+                            if code in state.get('not_found', []):
+                                state['not_found'].remove(code)
+                    else:
+                        log.debug('retry-search: %s still not found', code)
+                except Exception as e:
+                    log.warning('retry-search: %s error — %s', code, e)
+        except Exception:
+            log.exception('retry-search loop error')
+
+
 def _start_auto_import():
     global _auto_import_started
     if _auto_import_started:
         return
     _auto_import_started = True
+    _check_disk_space()
     threading.Thread(target=_auto_import_loop,   daemon=True, name='auto-import').start()
     threading.Thread(target=_auto_snatch_loop,   daemon=True, name='auto-snatch').start()
     threading.Thread(target=_startup_load_scan,  daemon=True, name='scan-startup').start()
     threading.Thread(target=_scene_sync_loop,    daemon=True, name='scene-sync').start()
     threading.Thread(target=_startup_dl_cleanup, daemon=True, name='dl-cleanup').start()
-    log.info('background threads started: auto-import, auto-snatch, scan-startup, scene-sync, dl-cleanup')
+    threading.Thread(target=_retry_search_loop,  daemon=True, name='retry-search').start()
+    log.info('background threads started: auto-import, auto-snatch, scan-startup, scene-sync, dl-cleanup, retry-search')
 
 # ── Ingest folder ─────────────────────────────────────────────────────────────
 
